@@ -220,14 +220,41 @@ point immediately after the drawer so the user can type the body."
   "Return the git worktree root at `default-directory', or nil."
   (and (fboundp 'magit-toplevel) (magit-toplevel)))
 
+(declare-function magit-get "magit-git")
+
+(defun ai-tracks--origin-url ()
+  "Return the URL of the `origin' remote, or nil if none is configured."
+  (and (fboundp 'magit-get) (magit-get "remote" "origin" "url")))
+
+(defun ai-tracks--parse-github-remote (url)
+  "If URL is a GitHub origin URL, return (OWNER . REPO); else nil.
+Accepts SSH, HTTPS, and ssh:// forms and strips a trailing .git."
+  (when url
+    (let ((cleaned (replace-regexp-in-string "\\.git\\'" "" url)))
+      (when (string-match
+             "\\`\\(?:git@github\\.com:\\|https?://github\\.com/\\|ssh://git@github\\.com/\\)\\([^/]+\\)/\\([^/]+\\)\\'"
+             cleaned)
+        (cons (match-string 1 cleaned) (match-string 2 cleaned))))))
+
+(defun ai-tracks--github-commit-url (sha)
+  "Return the GitHub commit URL for SHA, or nil if origin is not on GitHub."
+  (when-let* ((remote (ai-tracks--origin-url))
+              (parsed (ai-tracks--parse-github-remote remote)))
+    (format "https://github.com/%s/%s/commit/%s"
+            (car parsed) (cdr parsed) sha)))
+
 (defun ai-tracks--commit-info ()
   "Return a plist describing HEAD of the git repo at `default-directory'."
-  (let ((default-directory (or (ai-tracks--commit-cwd) default-directory)))
+  (let* ((default-directory (or (ai-tracks--commit-cwd) default-directory))
+         (sha (magit-rev-parse "HEAD")))
     (list :cwd     default-directory
-          :sha     (magit-rev-parse "HEAD")
+          :sha     sha
           :short   (magit-rev-parse "--short" "HEAD")
+          :url     (ai-tracks--github-commit-url sha)
           :subject (magit-git-string "log" "-1" "--pretty=%s" "HEAD")
-          :body    (magit-git-string "log" "-1" "--pretty=%b" "HEAD")
+          :body    (mapconcat #'identity
+                              (magit-git-lines "log" "-1" "--pretty=%b" "HEAD")
+                              "\n")
           :author  (magit-git-string "log" "-1" "--pretty=%aN" "HEAD")
           :files   (magit-git-lines "show" "--name-only"
                                     "--pretty=format:" "HEAD"))))
@@ -280,35 +307,39 @@ Returns the chosen org-roam-node, or nil for skip / abort."
       (cdr (assoc choice labels)))))
 
 (defun ai-tracks--insert-commit (node info)
-  "Insert a level-4 Commit heading under NODE for the commit INFO plist."
-  (let ((file (org-roam-node-file node))
-        (pos  (org-roam-node-point node)))
-    (with-current-buffer (find-file-noselect file)
-      (save-excursion
-        (widen)
-        (goto-char pos)
-        (goto-char (save-excursion (org-end-of-subtree t t)))
-        (unless (bolp) (insert "\n"))
-        (let ((now (current-time)))
-          (insert (format
-                   "**** Commit %s — %s\n:PROPERTIES:\n:CLAUDE-COMMIT: %s\n:COMMIT-SHA: %s\n:COMMIT-AUTHOR: %s\n:END:\n"
-                   (or (plist-get info :short) "")
-                   (or (plist-get info :subject) "")
-                   (format-time-string "[%Y-%m-%d %a %H:%M]" now)
-                   (or (plist-get info :sha) "")
-                   (or (plist-get info :author) ""))))
-        (let ((body (plist-get info :body)))
-          (when body
-            (let ((trimmed (string-trim body)))
-              (unless (string-empty-p trimmed)
-                (insert trimmed "\n")))))
-        (let ((files (plist-get info :files)))
-          (when files
-            (insert "\nFiles:\n")
-            (dolist (f files)
-              (unless (string-empty-p f)
-                (insert (format "- %s\n" f)))))))
-      (save-buffer))))
+  "Insert a level-4 Commit heading under NODE for the commit INFO plist.
+Switches to the node's buffer, positions point at the end of the new
+entry so the user can add or edit, and saves the buffer immediately."
+  (let ((buffer (find-file-noselect (org-roam-node-file node)))
+        (pos    (org-roam-node-point node)))
+    (switch-to-buffer buffer)
+    (widen)
+    (goto-char pos)
+    (goto-char (save-excursion (org-end-of-subtree t t)))
+    (unless (bolp) (insert "\n"))
+    (let ((now (current-time)))
+      (insert (format
+               "**** Commit %s — %s\n:PROPERTIES:\n:CLAUDE-COMMIT: %s\n:COMMIT-SHA: %s\n:COMMIT-AUTHOR: %s\n:END:\n"
+               (or (plist-get info :short) "")
+               (or (plist-get info :subject) "")
+               (format-time-string "[%Y-%m-%d %a %H:%M]" now)
+               (or (plist-get info :sha) "")
+               (or (plist-get info :author) ""))))
+    (when-let ((url (plist-get info :url)))
+      (insert (format "\n[[%s]]\n" url)))
+    (let ((body (plist-get info :body)))
+      (when body
+        (let ((trimmed (string-trim body)))
+          (unless (string-empty-p trimmed)
+            (insert "\n" trimmed "\n")))))
+    (let ((files (plist-get info :files)))
+      (when files
+        (insert "\nFiles:\n")
+        (dolist (f files)
+          (unless (string-empty-p f)
+            (insert (format "- %s\n" f))))))
+    (save-buffer)
+    (org-reveal)))
 
 (defun ai-tracks-after-commit ()
   "Post-commit handler for `ai-tracks-magit-mode'.
