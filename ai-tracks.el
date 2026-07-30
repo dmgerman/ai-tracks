@@ -78,12 +78,35 @@ the SessionStart JSON payload; either may be nil."
              :empty-lines 1))))
     (org-roam-capture-)))
 
+(defun ai-tracks--session-resume-add (session-id)
+  "Insert a level-4 Resume POI under the Track for SESSION-ID.
+Positions point after the drawer so the user can type a reflection on
+what they intend to accomplish in this resumed session.  Saves the
+buffer immediately."
+  (let* ((marker (ai-tracks--track-marker session-id))
+         (now   (current-time))
+         (title (format-time-string "Resume %Y-%m-%d %a %H:%M" now))
+         (ts    (format-time-string "[%Y-%m-%d %a %H:%M]" now)))
+    (switch-to-buffer (marker-buffer marker))
+    (goto-char (marker-position marker))
+    (goto-char (save-excursion (org-end-of-subtree t t)))
+    (unless (bolp) (insert "\n"))
+    (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: Resume\n:CLAUDE-RESUMED: %s\n:END:\n"
+                    title ts))
+    (org-reveal)
+    (save-buffer)
+    ts))
+
 ;;;###autoload
 (defun ai-tracks-session-start (json-file)
-  "Handler for the Claude Code SessionStart hook.
-JSON-FILE is a path to the JSON payload the hook wrote to disk.
-The file is read, parsed, and deleted; then the org-roam capture UI
-is opened for the user to pick a node and describe the session."
+  "Handler for the Claude Code SessionStart hook (startup and resume).
+JSON-FILE is a path to the JSON payload the hook wrote to disk.  The
+file is read, parsed, and deleted.  Routes on the `source' field:
+
+  startup           - open the org-roam capture UI (new Track).
+  resume + Track    - append a Resume POI (`ai-tracks--session-resume-add').
+  resume + no Track - fall through to the capture UI (edge case: the
+                      first SessionStart capture was cancelled)."
   (interactive "fClaude Code SessionStart JSON file: ")
   (let ((payload
          (unwind-protect
@@ -96,7 +119,12 @@ is opened for the user to pick a node and describe the session."
           (source     (alist-get 'source payload)))
       (unless (stringp session-id)
         (user-error "ai-tracks: no session_id in payload"))
-      (ai-tracks--capture-session session-id cwd source))))
+      (cond
+       ((and (equal source "resume")
+             (org-id-find (format "claude-%s" session-id) 'marker))
+        (ai-tracks--session-resume-add session-id))
+       (t
+        (ai-tracks--capture-session session-id cwd source))))))
 
 ;;;; Recap
 
@@ -112,22 +140,23 @@ Session-id is the raw Claude Code UUID; the heading's :ID: is
 
 (defun ai-tracks-recap-since (session-id)
   "Return the timestamp bounding the current recap window for SESSION-ID.
-Scans the track's subtree for level-4 Recap headings and returns the
-newest :CLAUDE-RECAPPED: property.  If no recap exists yet, returns
-the track's :CLAUDE-STARTED: property.  Signals a user-error if the
-track is not found or has no :CLAUDE-STARTED:."
+Boundary events are the newest of:
+  - the Track's :CLAUDE-STARTED: (initial boundary),
+  - each POI's :CLAUDE-RECAPPED: (Recap and End-of-session), and
+  - each POI's :CLAUDE-RESUMED: (Resume).
+Signals a user-error if none is found."
   (let ((marker (ai-tracks--track-marker session-id))
         (latest nil))
     (org-with-point-at marker
       (org-map-entries
        (lambda ()
-         (when-let* ((ts (org-entry-get (point) "CLAUDE-RECAPPED")))
-           (when (or (not latest) (string> ts latest))
-             (setq latest ts))))
+         (dolist (key '("CLAUDE-STARTED" "CLAUDE-RECAPPED" "CLAUDE-RESUMED"))
+           (when-let* ((ts (org-entry-get (point) key)))
+             (when (or (not latest) (string> ts latest))
+               (setq latest ts)))))
        nil 'tree))
     (or latest
-        (org-entry-get marker "CLAUDE-STARTED")
-        (user-error "ai-tracks: no :CLAUDE-STARTED: property on track for %s"
+        (user-error "ai-tracks: no boundary timestamp on Track for %s"
                     session-id))))
 
 (defun ai-tracks--recap-format-section (heading items)
@@ -138,11 +167,14 @@ Empty when ITEMS is nil or empty."
               (mapconcat (lambda (item) (format "- %s\n" item)) items ""))
     ""))
 
-(defun ai-tracks-recap-add (session-id json-file)
-  "Append a Recap heading with sub-sections under the track for SESSION-ID.
-JSON-FILE is a path to a JSON object with keys files, decisions, open,
-next, each mapping to an array of short strings.  Missing or empty
-sections are omitted.  The file is read and deleted."
+(defun ai-tracks--insert-recap-like (session-id json-file title-prefix property-key category)
+  "Append a level-4 POI heading of a recap-like variant under SESSION-ID's Track.
+TITLE-PREFIX prefixes the timestamp in the heading title (\"Recap\",
+\"Close session\").  PROPERTY-KEY is the drawer key holding the entry's
+timestamp (\"CLAUDE-RECAPPED\", \"CLAUDE-ENDED\").  CATEGORY is the
+:POI-CATEGORY: value (\"Recap\", \"End-session\").
+JSON-FILE carries keys summary, files, decisions, open, next — each an
+array of short strings.  The file is read and deleted."
   (let* ((marker (ai-tracks--track-marker session-id))
          (payload (unwind-protect
                       (with-temp-buffer
@@ -153,7 +185,8 @@ sections are omitted.  The file is read and deleted."
                          :null-object nil))
                     (ignore-errors (delete-file json-file))))
          (now   (current-time))
-         (title (format-time-string "Recap %Y-%m-%d %a %H:%M" now))
+         (title (format-time-string
+                 (concat title-prefix " %Y-%m-%d %a %H:%M") now))
          (ts    (format-time-string "[%Y-%m-%d %a %H:%M]" now))
          (sections '((files     . "Files touched")
                      (decisions . "Decisions")
@@ -162,11 +195,11 @@ sections are omitted.  The file is read and deleted."
     (org-with-point-at marker
       (goto-char (save-excursion (org-end-of-subtree t t)))
       (unless (bolp) (insert "\n"))
-      (insert (format "**** %s\n:PROPERTIES:\n:CLAUDE-RECAPPED: %s\n:END:\n"
-                      title ts))
-      ;; Summary bullets are the Recap heading's own body text: a
-      ;; narrative list of what was accomplished, above the per-topic
-      ;; level-5 sections below.
+      (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: %s\n:%s: %s\n:END:\n"
+                      title category property-key ts))
+      ;; Summary bullets are the heading's own body text: a narrative
+      ;; list of what was accomplished, above the per-topic level-5
+      ;; sections below.
       (let ((summary (alist-get 'summary payload)))
         (when (and summary (listp summary) (> (length summary) 0))
           (dolist (item summary)
@@ -178,6 +211,21 @@ sections are omitted.  The file is read and deleted."
       (save-buffer))
     ts))
 
+(defun ai-tracks-recap-add (session-id json-file)
+  "Append a Recap POI under the Track for SESSION-ID.
+See `ai-tracks--insert-recap-like' for the JSON schema."
+  (ai-tracks--insert-recap-like
+   session-id json-file "Recap" "CLAUDE-RECAPPED" "Recap"))
+
+(defun ai-tracks-end-session-add (session-id json-file)
+  "Append an End-of-session POI under the Track for SESSION-ID.
+Semantically this is a Recap — same category, same drawer key — with
+a different heading title marking it as the final recap of the session.
+That way `ai-tracks-recap-since' treats it as a recap boundary
+automatically.  Same JSON schema as `ai-tracks-recap-add'."
+  (ai-tracks--insert-recap-like
+   session-id json-file "End of session" "CLAUDE-RECAPPED" "Recap"))
+
 ;;;; Point of Interest
 
 (defvar ai-tracks-poi-categories
@@ -185,11 +233,11 @@ sections are omitted.  The file is read and deleted."
   "Categories offered when creating a POI via `ai-tracks-poi-add'.")
 
 (defun ai-tracks-poi-add (session-id)
-  "Insert a level-4 POI heading under the track for SESSION-ID.
-Prompts the user for a category from `ai-tracks-poi-categories'
-via `completing-read', writes :TRACK-CATEGORY: and :CLAUDE-POI:
-into the drawer, switches to the org file's buffer, and positions
-point immediately after the drawer so the user can type the body."
+  "Insert a level-4 explicit-POI heading under the Track for SESSION-ID.
+Prompts the user for a category from `ai-tracks-poi-categories' via
+`completing-read', writes :POI-CATEGORY: and :CLAUDE-POI: into the
+drawer, switches to the org file's buffer, and positions point
+immediately after the drawer so the user can type the body."
   (let* ((marker (ai-tracks--track-marker session-id))
          (category (completing-read
                     "POI category: "
@@ -202,7 +250,7 @@ point immediately after the drawer so the user can type the body."
     (goto-char (marker-position marker))
     (goto-char (save-excursion (org-end-of-subtree t t)))
     (unless (bolp) (insert "\n"))
-    (insert (format "**** %s\n:PROPERTIES:\n:TRACK-CATEGORY: %s\n:CLAUDE-POI: %s\n:END:\n"
+    (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: %s\n:CLAUDE-POI: %s\n:END:\n"
                     title category ts))
     (org-reveal)
     (save-buffer)
@@ -319,7 +367,7 @@ entry so the user can add or edit, and saves the buffer immediately."
     (unless (bolp) (insert "\n"))
     (let ((now (current-time)))
       (insert (format
-               "**** Commit %s — %s\n:PROPERTIES:\n:CLAUDE-COMMIT: %s\n:COMMIT-SHA: %s\n:COMMIT-AUTHOR: %s\n:END:\n"
+               "**** Commit %s — %s\n:PROPERTIES:\n:POI-CATEGORY: Commit\n:CLAUDE-COMMIT: %s\n:COMMIT-SHA: %s\n:COMMIT-AUTHOR: %s\n:END:\n"
                (or (plist-get info :short) "")
                (or (plist-get info :subject) "")
                (format-time-string "[%Y-%m-%d %a %H:%M]" now)
