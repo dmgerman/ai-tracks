@@ -78,7 +78,8 @@ the SessionStart JSON payload; either may be nil."
              :empty-lines 1))))
     (org-roam-capture-)))
 
-(defun ai-tracks--session-resume-add (session-id)
+;;;###autoload
+(defun ai-tracks-resume-add (session-id)
   "Insert a level-4 Resume POI under the Track for SESSION-ID.
 Positions point after the drawer so the user can type a reflection on
 what they intend to accomplish in this resumed session.  Saves the
@@ -97,16 +98,74 @@ buffer immediately."
     (save-buffer)
     ts))
 
+(defun ai-tracks--last-poi-title (session-id)
+  "Return the title of the bottommost level-4 POI under the Track for SESSION-ID, or nil."
+  (let ((marker (ai-tracks--track-marker session-id)))
+    (org-with-point-at marker
+      (save-restriction
+        (org-narrow-to-subtree)
+        (goto-char (point-max))
+        (when (re-search-backward "^\\*\\{4\\} " nil t)
+          (substring-no-properties (org-get-heading t t t t)))))))
+
+(defun ai-tracks--missing-end-of-session-p (session-id)
+  "Non-nil if the Track has POIs and the last one is not an End-of-session.
+Signals that the previous leg was never wrapped up before Claude closed."
+  (let ((title (ai-tracks--last-poi-title session-id)))
+    (and title (not (string-prefix-p "End of session" title)))))
+
+(defconst ai-tracks--resume-recovery-message
+  (concat
+   "IMPORTANT — ai-tracks session-continuity task.  The previous leg of this Claude session "
+   "was never closed with an End-of-session recap.  Before addressing any user request:\n\n"
+   "1. Run /at:end-session to summarise the previous leg's work "
+   "(you have that leg's conversation in context via `claude -c`).\n"
+   "2. Run /at:resume to record this resume event as a Resume POI.\n\n"
+   "Then proceed with the user's request.")
+  "Message injected into the resumed Claude session when the previous leg
+was not wrapped up with an End-of-session recap.  Instructs Claude to
+run the two slash commands in order so the boundary lookup stays
+consistent (End-of-session first — its :CLAUDE-RECAPPED: becomes the
+boundary — then /at:resume adds the Resume POI going forward).")
+
+(defun ai-tracks--write-hook-notify (context-string)
+  "Write CONTEXT-STRING as a SessionStart hookSpecificOutput JSON blob to a temp file.
+Returns the path.  The bash wrapper reads and prints this file, then deletes it."
+  (let ((out-file (make-temp-file "ai-tracks-notify-" nil ".json"))
+        (payload `((hookSpecificOutput
+                    . ((hookEventName . "SessionStart")
+                       (additionalContext . ,context-string))))))
+    (with-temp-file out-file
+      (insert (json-encode payload)))
+    out-file))
+
 ;;;###autoload
 (defun ai-tracks-session-start (json-file)
   "Handler for the Claude Code SessionStart hook (startup and resume).
-JSON-FILE is a path to the JSON payload the hook wrote to disk.  The
-file is read, parsed, and deleted.  Routes on the `source' field:
+JSON-FILE is a path to the payload the hook wrote to disk; it is read
+and deleted.
 
-  startup           - open the org-roam capture UI (new Track).
-  resume + Track    - append a Resume POI (`ai-tracks--session-resume-add').
-  resume + no Track - fall through to the capture UI (edge case: the
-                      first SessionStart capture was cancelled)."
+Routes on the `source' field:
+
+  startup                                    open the org-roam capture UI
+                                             (new Track).
+  resume + Track + End-of-session present    append a Resume POI.
+  resume + Track + End-of-session missing    return a notify-file path
+                                             so bash can inject a
+                                             context message asking
+                                             Claude to run
+                                             /at:end-session then
+                                             /at:resume (do NOT add
+                                             the Resume POI here —
+                                             /at:end-session's
+                                             boundary lookup must not
+                                             see the resume yet).
+  resume + no Track                          fall through to the
+                                             capture UI (edge case:
+                                             the first SessionStart
+                                             capture was cancelled).
+
+Return value: path to a JSON hook-output file, or nil."
   (interactive "fClaude Code SessionStart JSON file: ")
   (let ((payload
          (unwind-protect
@@ -122,9 +181,13 @@ file is read, parsed, and deleted.  Routes on the `source' field:
       (cond
        ((and (equal source "resume")
              (org-id-find (format "claude-%s" session-id) 'marker))
-        (ai-tracks--session-resume-add session-id))
+        (if (ai-tracks--missing-end-of-session-p session-id)
+            (ai-tracks--write-hook-notify ai-tracks--resume-recovery-message)
+          (ai-tracks-resume-add session-id)
+          nil))
        (t
-        (ai-tracks--capture-session session-id cwd source))))))
+        (ai-tracks--capture-session session-id cwd source)
+        nil)))))
 
 ;;;; Recap
 
@@ -167,23 +230,27 @@ Empty when ITEMS is nil or empty."
               (mapconcat (lambda (item) (format "- %s\n" item)) items ""))
     ""))
 
-(defun ai-tracks--insert-recap-like (session-id json-file title-prefix property-key category)
+(defun ai-tracks--read-payload (json-file)
+  "Read JSON-FILE, delete it, and return the parsed alist.
+Arrays are decoded as lists."
+  (unwind-protect
+      (with-temp-buffer
+        (insert-file-contents json-file)
+        (json-parse-buffer
+         :object-type 'alist
+         :array-type 'list
+         :null-object nil))
+    (ignore-errors (delete-file json-file))))
+
+(defun ai-tracks--insert-recap-like (session-id payload title-prefix property-key category)
   "Append a level-4 POI heading of a recap-like variant under SESSION-ID's Track.
-TITLE-PREFIX prefixes the timestamp in the heading title (\"Recap\",
-\"Close session\").  PROPERTY-KEY is the drawer key holding the entry's
-timestamp (\"CLAUDE-RECAPPED\", \"CLAUDE-ENDED\").  CATEGORY is the
-:POI-CATEGORY: value (\"Recap\", \"End-session\").
-JSON-FILE carries keys summary, files, decisions, open, next — each an
-array of short strings.  The file is read and deleted."
+PAYLOAD is a parsed alist (see `ai-tracks--read-payload') with keys
+summary, files, decisions, open, next — each an array of short strings.
+TITLE-PREFIX prefixes the timestamp in the heading title (e.g. \"Recap\",
+\"End of session\").  PROPERTY-KEY is the drawer key holding the entry's
+timestamp (e.g. \"CLAUDE-RECAPPED\").  CATEGORY is the :POI-CATEGORY:
+value."
   (let* ((marker (ai-tracks--track-marker session-id))
-         (payload (unwind-protect
-                      (with-temp-buffer
-                        (insert-file-contents json-file)
-                        (json-parse-buffer
-                         :object-type 'alist
-                         :array-type 'list
-                         :null-object nil))
-                    (ignore-errors (delete-file json-file))))
          (now   (current-time))
          (title (format-time-string
                  (concat title-prefix " %Y-%m-%d %a %H:%M") now))
@@ -211,20 +278,77 @@ array of short strings.  The file is read and deleted."
       (save-buffer))
     ts))
 
+(defun ai-tracks--find-or-create-summary-node (track-marker)
+  "Return a marker at the Summary heading under the Track at TRACK-MARKER.
+Creates a level-4 `Summary' heading as the first child of the Track
+if it doesn't already exist.  The new heading carries
+:POI-CATEGORY: Summary and an initially-blank :CLAUDE-SUMMARIZED:."
+  (org-with-point-at track-marker
+    (save-restriction
+      (org-narrow-to-subtree)
+      (goto-char (point-min))
+      (let ((existing (save-excursion
+                        (when (re-search-forward "^\\*\\{4\\} Summary$" nil t)
+                          (line-beginning-position)))))
+        (if existing
+            (progn (goto-char existing) (point-marker))
+          ;; Insert as first level-4 child (or at end if no children).
+          (let ((insert-at (save-excursion
+                             (goto-char (point-min))
+                             (if (re-search-forward "^\\*\\{4\\} " nil t)
+                                 (line-beginning-position)
+                               (point-max)))))
+            (goto-char insert-at)
+            (unless (bolp) (insert "\n"))
+            (let ((heading-start (point)))
+              (insert "**** Summary\n"
+                      ":PROPERTIES:\n"
+                      ":POI-CATEGORY: Summary\n"
+                      ":CLAUDE-SUMMARIZED: \n"
+                      ":END:\n")
+              (goto-char heading-start)
+              (point-marker))))))))
+
+(defun ai-tracks--append-to-summary (session-id items)
+  "Append ITEMS (list of strings) as a new dated bullet list under Summary.
+Finds or creates the Summary node for SESSION-ID's Track, appends a
+new group headed by the current timestamp with one bullet per item,
+and updates :CLAUDE-SUMMARIZED: on the Summary drawer.
+No-op when ITEMS is nil or empty."
+  (when (and items (listp items) (> (length items) 0))
+    (let* ((track-marker   (ai-tracks--track-marker session-id))
+           (summary-marker (ai-tracks--find-or-create-summary-node track-marker))
+           (now (current-time))
+           (ts  (format-time-string "[%Y-%m-%d %a %H:%M]" now)))
+      (org-with-point-at summary-marker
+        (org-entry-put nil "CLAUDE-SUMMARIZED" ts)
+        (goto-char (save-excursion (org-end-of-subtree t t)))
+        (unless (bolp) (insert "\n"))
+        (insert "\n" (format "%s:\n" ts))
+        (dolist (item items)
+          (insert (format "- %s\n" item)))
+        (save-buffer)))))
+
 (defun ai-tracks-recap-add (session-id json-file)
   "Append a Recap POI under the Track for SESSION-ID.
 See `ai-tracks--insert-recap-like' for the JSON schema."
   (ai-tracks--insert-recap-like
-   session-id json-file "Recap" "CLAUDE-RECAPPED" "Recap"))
+   session-id (ai-tracks--read-payload json-file)
+   "Recap" "CLAUDE-RECAPPED" "Recap"))
 
 (defun ai-tracks-end-session-add (session-id json-file)
-  "Append an End-of-session POI under the Track for SESSION-ID.
-Semantically this is a Recap — same category, same drawer key — with
-a different heading title marking it as the final recap of the session.
-That way `ai-tracks-recap-since' treats it as a recap boundary
-automatically.  Same JSON schema as `ai-tracks-recap-add'."
-  (ai-tracks--insert-recap-like
-   session-id json-file "End of session" "CLAUDE-RECAPPED" "Recap"))
+  "Append an End-of-session POI and update the Track's rolling Summary.
+The End-of-session POI is semantically a Recap (same category and
+drawer key) with a different title.  Additionally, the `summary'
+bullets are appended as a new dated group to the Track's Summary
+node (created as the first level-4 child on demand).  Same JSON
+schema as `ai-tracks-recap-add'."
+  (let* ((payload (ai-tracks--read-payload json-file))
+         (ts (ai-tracks--insert-recap-like
+              session-id payload
+              "End of session" "CLAUDE-RECAPPED" "Recap")))
+    (ai-tracks--append-to-summary session-id (alist-get 'summary payload))
+    ts))
 
 ;;;; Point of Interest
 

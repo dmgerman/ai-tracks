@@ -6,8 +6,13 @@
 # with the file path, so no shell quoting is needed for values like
 # `cwd' that may contain metacharacters.
 #
-# `--no-wait' plus backgrounding keeps the hook from blocking Claude's
-# startup while the user completes the org-capture UI.
+# Blocking call: `ai-tracks-session-start' returns either nil (no
+# further action needed) or the path to a JSON hook-output file
+# containing a `hookSpecificOutput.additionalContext' payload for
+# Claude Code to inject as session-start context.  We `cat' the file
+# to stdout and delete it.  Emacs returns quickly in every case —
+# the Track/POI/capture UI is set up but the function does not wait
+# for user interaction.
 
 set -u
 
@@ -25,7 +30,20 @@ tmpfile="$tmpfile.json"
 
 cat > "$tmpfile"
 
-emacsclient --no-wait -e "(ai-tracks-session-start \"$tmpfile\")" \
-    >/dev/null 2>&1 &
+result=$(emacsclient -e "(ai-tracks-session-start \"$tmpfile\")" 2>/dev/null)
+
+# Elisp prints nil as literal "nil" and a string with surrounding
+# double quotes.  A returned file path is one such quoted string.
+if [ -z "$result" ] || [ "$result" = "nil" ]; then
+    exit 0
+fi
+
+result="${result#\"}"
+result="${result%\"}"
+
+if [ -f "$result" ]; then
+    cat "$result"
+    rm -f "$result"
+fi
 
 exit 0

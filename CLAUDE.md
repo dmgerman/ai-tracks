@@ -25,9 +25,35 @@ work.
   | `Resume` | `ai-tracks--session-resume-add` | SessionStart hook with `source: resume` |
   | `Commit` | `ai-tracks--insert-commit` | `ai-tracks-magit-mode` fires on any magit commit |
   | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `ai-tracks-poi-add` | `/at:poi` (user-authored — "explicit POI" in module vocabulary) |
+  | `Summary` | `ai-tracks--append-to-summary` (invoked from `ai-tracks-end-session-add`) | Rolling per-Track summary — the first level-4 child of the Track; gets a new dated bullet group every `/at:end-session`. |
 
   The five explicit values live in `ai-tracks-poi-categories`. Recap /
-  Resume / Commit are set by the code that creates the POI.
+  Resume / Commit / Summary are set by the code that creates the POI.
+
+## Resume recovery (missing End-of-session)
+
+If the user closed Claude without running `/at:end-session`, the
+previous leg has no wrap-up recap.  On the next `claude -c`, the
+SessionStart hook detects this: `ai-tracks--missing-end-of-session-p`
+checks whether the bottommost level-4 POI's title starts with
+`End of session`.  If not, the hook returns an `additionalContext`
+telling Claude to:
+
+1. Run `/at:end-session` first — Claude *has* the previous leg's
+   conversation in context via `claude -c`, so it can synthesise the
+   summary.  This writes an End-of-session POI whose
+   `:CLAUDE-RECAPPED:` becomes the new boundary.
+2. Then run `/at:resume` — appends the Resume POI going forward.
+
+The order matters: the Resume POI must be inserted *after* the
+End-of-session, or `/at:end-session`'s `ai-tracks-recap-since`
+boundary would look at the just-inserted Resume (`CLAUDE-RESUMED`),
+find that it is the newest boundary marker, and try to summarise a
+zero-length window.
+
+If the last POI *is* an End-of-session (the tidy case), the hook
+skips the notification and just appends the Resume POI directly —
+no Claude action required.
 
 ## Recap boundary
 
@@ -113,6 +139,29 @@ resume only summarises work done in the resumed leg.
      <user-typed reflection on what to accomplish in this resumed leg>
 ```
 
+The **Summary** node (POI-CATEGORY: Summary) is a rolling per-Track
+digest that lives as the *first* level-4 child of the Track — inserted
+by `ai-tracks--append-to-summary` on demand from
+`ai-tracks-end-session-add`.  Each `/at:end-session` appends the
+`summary` array from the payload as a new dated bullet group and
+updates `:CLAUDE-SUMMARIZED:` to the current timestamp:
+
+```
+**** Summary
+     :PROPERTIES:
+     :POI-CATEGORY:      Summary
+     :CLAUDE-SUMMARIZED: [2026-07-31 Fri 09:15]   ← newest group's timestamp
+     :END:
+
+     [2026-07-30 Thu 09:04]:
+     - accomplished 1
+     - accomplished 2
+
+     [2026-07-31 Fri 09:15]:
+     - accomplished 3
+     - accomplished 4
+```
+
 Recaps and End-of-session share code (`ai-tracks--insert-recap-like`);
 they only differ in title prefix. Explicit POIs, Resumes, and Commits
 each have their own writer.
@@ -131,6 +180,7 @@ need a fresh session to appear.
 | `/at:track-start` | `ai-tracks-session-start` | Manually start a Track when the SessionStart hook didn't fire (or was cancelled). Uses `source:"manual"`. |
 | `/at:recap` | `ai-tracks-recap-add` | Mid-session recap. Claude gathers boundary + writes the summary JSON. |
 | `/at:end-session` | `ai-tracks-end-session-add` | Final wrap-up right before the session ends. Same shape as recap. |
+| `/at:resume` | `ai-tracks-resume-add` | Append a Resume POI. Normally auto-fired by the SessionStart hook on `source: resume`; only invoked manually by Claude during the missing-end-of-session recovery flow (see below). |
 | `/at:poi` | `ai-tracks-poi-add` | User-typed observation ("explicit POI" in module vocabulary). Emacs prompts for category and puts point in the org file. |
 
 ### Automatic triggers
@@ -141,11 +191,15 @@ need a fresh session to appear.
   `ai-tracks-session-start`. The elisp routes on the `source` field:
   - `startup` opens an `org-roam-node-read` prompt so the user picks
     the parent node and writes an intention.
-  - `resume` + existing Track appends a Resume POI and drops point in
-    the org file for the user to jot down what they intend to do this
-    leg.
-  - `resume` + missing Track falls through to the capture UI (edge
-    case: the first SessionStart capture was cancelled).
+  - `resume` + existing Track + last POI is an End-of-session →
+    appends a Resume POI and drops point in the org file for the
+    user to jot down what they intend to do this leg.
+  - `resume` + existing Track + missing End-of-session (see
+    "Resume recovery" below) → returns a JSON hook-output payload;
+    the bash wrapper `cat`s it to stdout so Claude Code injects it
+    as `additionalContext`.  No Resume POI is added at this stage.
+  - `resume` + missing Track → falls through to the capture UI
+    (edge case: the first SessionStart capture was cancelled).
 - **`ai-tracks-magit-mode`** (global minor mode, off by default;
   lighter `AITrk`). When on, hooks
   `git-commit-post-finish-hook` (message-editing commits) and
@@ -198,6 +252,9 @@ need a fresh session to appear.
   POI (still `POI-CATEGORY: Recap`; only the title differs) (blocking).
 - `bin/ai-tracks-poi.sh` — fires an explicit-POI capture in Emacs
   (non-blocking).
+- `bin/ai-tracks-resume.sh` — fires a Resume POI capture in Emacs
+  (non-blocking; normally invoked only during recovery from a missing
+  End-of-session).
 - `~/.claude/commands/at/*.md` — slash-command instructions.
 - Loaded via `use-package ai-tracks` in `dmg-ai.org` under
   `** ai-tracks`.
