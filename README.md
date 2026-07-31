@@ -1,0 +1,265 @@
+# ai-tracks
+
+Record each Claude Code session as structured notes inside an
+existing org-roam node. The conversation, its recaps, its POIs, and
+the commits it produces all land under a single `Track` heading next
+to the project they belong to.
+
+## Requirements
+
+- Emacs 28.1 or later.
+- [`org-roam`](https://github.com/org-roam/org-roam) 2.2.2+.
+- [`org-roam-gt`](https://github.com/dmgerman/org-roam-gt) 0.4+
+  (provides the `node+headline` capture target).
+- Claude Code (for the SessionStart hook and slash commands).
+- `magit` (optional — for the commit-tracking minor mode).
+
+## Installation
+
+Clone the module into `~/.emacs.d/modules/ai-tracks/` and load it with
+`use-package`:
+
+```emacs-lisp
+(use-package ai-tracks
+  :straight nil
+  :load-path "~/.emacs.d/modules/ai-tracks"
+  :after (org-roam org-roam-gt)
+  :commands (ai-tracks-session-start
+             ai-tracks-recap-since
+             ai-tracks-recap-add
+             ai-tracks-poi-add
+             ai-tracks-resume-add
+             ai-tracks-magit-mode))
+```
+
+## Configuring Claude Code
+
+### `~/.claude/settings.json`
+
+Two things need to go into your Claude Code settings: the
+SessionStart hook (which fires on both `startup` and `resume`) and a
+permission entry so Claude can invoke the ai-tracks scripts without
+prompting each time.
+
+Full block, copy-paste ready — **replace `/Users/YOU` with your home
+directory**:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-session-start.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-recap-since.sh *)",
+      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-recap.sh *)",
+      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-end-session.sh *)",
+      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-poi.sh *)",
+      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-resume.sh *)"
+    ]
+  }
+}
+```
+
+**If `~/.claude/settings.json` doesn't exist**, save the block above
+as your entire file (with the path substitution done).
+
+**If it exists**, merge the two top-level keys (`hooks` and
+`permissions`) into your file — don't overwrite the whole thing.
+If you already have `hooks.SessionStart` or `permissions.allow`
+entries, append rather than replace: both are arrays.
+
+Notes:
+
+- Permission entries must use the **literal absolute path** — Claude
+  Code does not expand `~` or `$HOME` when matching permission rules.
+  The syntax `Bash(<path> *)` (space before `*`) matches the script
+  invoked with any arguments.
+- The hook `command` string is executed via the shell, so `$HOME`
+  would expand there — but keeping literal paths in both places is
+  simpler.
+- The `permissions.allow` block is not strictly required — without
+  it, Claude Code will just prompt on first use of each script.
+  Adding it saves you the confirmations.
+
+### Slash commands (`~/.claude/commands/at/`)
+
+`/at:track-start`, `/at:recap`, `/at:end-session`, `/at:poi`, and
+`/at:resume` live in `~/.claude/commands/at/*.md`. Copy the `.md`
+files from this repo's `.claude/commands/at/` there (or symlink the
+directory).
+
+Claude Code caches its slash-command list at session start, so
+newly-added commands only show up in a fresh session (`/exit` and
+relaunch).
+
+## Enabling commit tracking
+
+Optional. When on, each magit commit prompts you in Emacs to attach
+the commit to a Track:
+
+```emacs-lisp
+;; Enable manually:
+(ai-tracks-magit-mode 1)
+```
+
+Or add `(ai-tracks-magit-mode 1)` to your Emacs init after ai-tracks
+loads. Command-line commits are deliberately outside this scope.
+
+## Concepts
+
+- **Track** — one heading per Claude session, `:ID: claude-<uuid>`,
+  living under a `** AI Tracks` heading you pick at session start.
+- **POI** (Point of Interest) — any level-4 heading under a Track.
+  Every POI carries a `:POI-CATEGORY:` naming its kind.
+
+Categories:
+
+| Category | How it's created |
+|---|---|
+| `Recap` | `/at:recap` (mid-session) or `/at:end-session` (final wrap-up, title `End of session …`) |
+| `Resume` | Auto: SessionStart hook fires with `source: resume` |
+| `Commit` | Auto: `ai-tracks-magit-mode` on a magit commit |
+| `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `/at:poi` (you pick from the list) |
+| `Summary` | Auto on every `/at:end-session` — appended to a rolling Summary heading at the top of the Track |
+
+## Slash commands
+
+| Command | What it does |
+|---|---|
+| `/at:track-start` | Manually create a Track for the current session (if the SessionStart hook didn't fire or you cancelled it). |
+| `/at:recap` | Ask Claude to summarise work since the last boundary and append a Recap POI. |
+| `/at:end-session` | Final wrap-up: appends an `End of session …` POI and grows the rolling Summary node. Run this before you close Claude. |
+| `/at:poi` | Opens an interactive POI capture in Emacs — pick a category, type your note. |
+| `/at:resume` | Append a Resume POI. Normally auto-fired on resume; only invoked manually during the missing-end-of-session recovery flow. |
+
+## Typical workflow
+
+1. **Start Claude Code** in your project directory. The SessionStart
+   hook fires: Emacs opens an `org-roam-node-read` prompt for you to
+   pick the parent node for this session's Track. Type an intention
+   (what you're going to work on) and `C-c C-c` to finish.
+2. **Work with Claude.** As you go:
+   - Run `/at:poi` any time you want to mark an observation
+     (surprise, event, decision, etc.).
+   - Run `/at:recap` periodically to snapshot progress; Claude writes
+     a Recap POI with summary, files touched, decisions, open
+     threads, and next steps.
+   - Commit through magit while `ai-tracks-magit-mode` is on to have
+     each commit prompted for attachment to the Track.
+3. **Before closing Claude**, run `/at:end-session`. Claude writes a
+   final `End of session …` POI *and* appends its bullets as a new
+   dated group to the Track's rolling `Summary` heading.
+4. **Resume with `claude -c`** later. The SessionStart hook fires:
+   - If the last leg was properly closed with an End-of-session, a
+     `Resume` POI is appended and Emacs drops point in the org file
+     so you can jot down what you're planning to accomplish this leg.
+   - If you forgot to run `/at:end-session`, the hook injects a
+     notice into the resumed session asking Claude to run
+     `/at:end-session` first (Claude has the previous leg's
+     conversation in context) and then `/at:resume`. Your history
+     stays complete.
+
+## What the org file looks like
+
+```
+* <your node title>                          (level 1, org-roam node)
+** AI Tracks                                 (level 2, plain)
+*** Track 2026-07-30 Thu 06:53 <intention>   (level 3, :ID: claude-<uuid>)
+
+**** Summary                                 (rolling per-Track)
+     :PROPERTIES:
+     :POI-CATEGORY:      Summary
+     :CLAUDE-SUMMARIZED: [2026-07-31 Fri 09:15]
+     :END:
+
+     [2026-07-30 Thu 09:04]:
+     - accomplished 1
+     - accomplished 2
+
+     [2026-07-31 Fri 09:15]:
+     - accomplished 3
+
+**** Recap 2026-07-30 Thu 07:23              (mid-session recap)
+     - narrative summary bullets
+***** Files touched
+***** Decisions
+***** Open threads
+***** Next
+
+**** POI 2026-07-30 Thu 07:34                (explicit observation)
+     :PROPERTIES:
+     :POI-CATEGORY: Observation
+     :END:
+     <your typed note>
+
+**** Commit abc123 — Fix parser bug          (from magit)
+     [[https://github.com/OWNER/REPO/commit/<sha>]]
+
+     <full commit body>
+     Files:
+     - path/a
+     - path/b
+
+**** End of session 2026-07-30 Thu 09:04     (final recap of the leg)
+
+**** Resume 2026-07-31 Fri 08:00             (start of a new leg)
+     <your typed intention for this resumed leg>
+```
+
+## Manual usage (without a Claude session)
+
+Each slash command has a small bash wrapper you can invoke directly
+if you want to test or script it. See `bin/`:
+
+- `ai-tracks-session-start.sh` — takes SessionStart-shape JSON on
+  stdin (`{session_id, cwd, source}`) and calls the emacs handler.
+- `ai-tracks-recap.sh`, `ai-tracks-end-session.sh` — take the summary
+  JSON on stdin (`{summary, files, decisions, open, next}`) and the
+  session id as `$1` (defaults to `$CLAUDE_CODE_SESSION_ID`).
+- `ai-tracks-recap-since.sh` — prints the boundary timestamp for
+  the given session.
+- `ai-tracks-poi.sh`, `ai-tracks-resume.sh` — fire an interactive
+  capture in Emacs; no stdin, session id as `$1`.
+
+## Troubleshooting
+
+**Nothing happens when I commit.** `ai-tracks-magit-mode` is off by
+default; enable it with `M-x ai-tracks-magit-mode`. Check the
+modeline for the `AITrk` lighter.
+
+**Slash commands aren't recognised.** Claude Code caches its
+custom-command list at session start. Quit and relaunch Claude Code
+after adding new commands. Custom commands must live in
+`~/.claude/commands/at/*.md` (the `at:` prefix is the folder name).
+
+**Emacs error on `/at:recap` / `/at:end-session`: "no track with ID
+claude-<uuid>; run /track-start first."** The SessionStart capture
+was cancelled or the file was moved. Run `/at:track-start` to create
+the Track manually, then retry.
+
+**Track candidates for a commit include an old test entry.** Delete
+the stale Track heading from its org file; org-roam re-sync (or the
+next `org-roam-db-sync`) drops it from the DB and the picker.
+
+## Files
+
+- `ai-tracks.el` — the module.
+- `bin/*.sh` — bash wrappers for the slash commands and the
+  SessionStart hook.
+- `README.md` — this file.
+- `CLAUDE.md` — implementation notes for agents editing this module.
+
+## License
+
+GPL-3.0-or-later. See the file header of `ai-tracks.el`.
