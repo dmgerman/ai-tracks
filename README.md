@@ -39,10 +39,11 @@ Clone the module into `~/.emacs.d/modules/ai-tracks/` and load it with
 
 ### `~/.claude/settings.json`
 
-Two things need to go into your Claude Code settings: the
-SessionStart hook (which fires on both `startup` and `resume`) and a
-permission entry so Claude can invoke the ai-tracks scripts without
-prompting each time.
+Three things need to go into your Claude Code settings: the
+SessionStart hook (fires on both `startup` and `resume`), the
+PostToolUse hook for `ExitPlanMode` (records a Plan POI every time
+you approve, reject, or edit a plan), and a permission entry so
+Claude can invoke the ai-tracks scripts without prompting each time.
 
 Full block, copy-paste ready — **replace `/Users/YOU` with your home
 directory**:
@@ -60,6 +61,17 @@ directory**:
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-plan.sh"
+          }
+        ]
+      }
     ]
   },
   "permissions": {
@@ -69,7 +81,8 @@ directory**:
       "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-end-session.sh *)",
       "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-poi.sh *)",
       "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-resume.sh *)",
-      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-goto-track.sh *)"
+      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-goto-track.sh *)",
+      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-plan.sh *)"
     ]
   }
 }
@@ -134,6 +147,7 @@ Categories:
 | `Recap` | `/at:recap` (mid-session) or `/at:end-session` (final wrap-up, title `End of session …`) |
 | `Resume` | Auto: SessionStart hook fires with `source: resume` |
 | `Commit` | Auto: `ai-tracks-magit-mode` on a magit commit |
+| `Plan` | Auto: PostToolUse hook on `ExitPlanMode`. The POI is created — and updated in place on re-plan — every time Claude submits a plan for approval. The `:POI-SUB-CATEGORY:` records `accepted`, `rejected`, or `edited` based on what the user did. Title is the plan's own first `#` heading (fallback `Plan [<date>]`). |
 | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `/at:poi` (you pick from the list) |
 | `Summary` | Auto on every `/at:end-session` — appended to a rolling Summary heading at the top of the Track |
 
@@ -231,6 +245,15 @@ trees, etc.).
      - path/a
      - path/b
 
+**** Refactor the parser                       (Plan POI, title from `# ...`)
+     :PROPERTIES:
+     :POI-CATEGORY:      Plan
+     :POI-SUB-CATEGORY:  accepted
+     :CLAUDE-PLANNED:    [2026-07-30 Thu 08:12]
+     :END:
+
+     <plan body, pandoc'd markdown→org, headings demoted to level 5+>
+
 **** End of session [2026-07-30 Thu 09:04]     (final recap of the leg)
 
 **** Resume [2026-07-31 Fri 08:00]             (start of a new leg)
@@ -252,6 +275,10 @@ if you want to test or script it. See `bin/`:
 - `ai-tracks-poi.sh`, `ai-tracks-resume.sh`, `ai-tracks-goto-track.sh`
   — fire an interactive capture / navigation in Emacs; no stdin,
   session id as `$1`.
+- `ai-tracks-plan.sh` — takes PostToolUse-shape JSON for the
+  `ExitPlanMode` tool on stdin (`{session_id, tool_input: {plan,
+  planFilePath}, tool_response: {data: {planWasEdited, plan,
+  filePath}}}`) and calls `ai-tracks-plan-add`.
 
 ## Troubleshooting
 

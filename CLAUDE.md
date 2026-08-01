@@ -27,6 +27,7 @@ slash-command behavior; keep it in sync when those change.
   | `Recap` (title `End of session …`) | `ai-tracks-end-session-add` | `/at:end-session` (the final recap of a session; same category, different title only) |
   | `Resume` | `ai-tracks--session-resume-add` | SessionStart hook with `source: resume` |
   | `Commit` | `ai-tracks--insert-commit` | `ai-tracks-magit-mode` fires on any magit commit |
+  | `Plan` | `ai-tracks-plan-add` | Claude Code PostToolUse hook fires on every `ExitPlanMode` (approved, rejected, or edited) |
   | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `ai-tracks-poi-add` | `/at:poi` (user-authored — "explicit POI" in module vocabulary) |
   | `Summary` | `ai-tracks--append-to-summary` (invoked from `ai-tracks-end-session-add`) | Rolling per-Track summary — the first level-4 child of the Track; gets a new dated bullet group every `/at:end-session`. |
 
@@ -84,6 +85,8 @@ Per-category timestamp drawer key (in addition to `:POI-CATEGORY:`):
 - explicit POI → `:CLAUDE-POI:`
 - Commit → `:CLAUDE-COMMIT:` plus `:COMMIT-SHA:`, `:COMMIT-AUTHOR:`
 - Summary → `:CLAUDE-SUMMARIZED:`
+- Plan → `:CLAUDE-PLANNED:` plus `:POI-SUB-CATEGORY:` (values: `accepted`,
+  `rejected`, `edited` — classified from the PostToolUse `tool_response`)
 
 Invariants:
 
@@ -92,6 +95,10 @@ Invariants:
   they differ only in title prefix.
 - Explicit POI body is `#+begin_quote`(prompt) + Claude's last
   answer (pandoc'd) + user commentary.
+- Plan POIs update in place: on `ExitPlanMode`, if the bottommost
+  level-4 POI is already `POI-CATEGORY: Plan`, it is deleted first.
+  So reject → replan overwrites, while a Plan following non-Plan
+  POIs appends.
 
 ## Entry points
 
@@ -113,6 +120,15 @@ need a fresh session to appear.
 
 ### Automatic triggers
 
+- **Claude Code PostToolUse hook on `ExitPlanMode`** — configured
+  in `~/.claude/settings.json`. Runs `bin/ai-tracks-plan.sh` which
+  hands the payload to `ai-tracks-plan-add`. Fires after the user
+  acts on the plan (approve, reject, or edit). The plan markdown
+  and the plan-file path are both injected into `tool_input` by
+  Claude Code's `normalizeToolInput` step, so the hook payload has
+  them without needing to read the plan file. Missing Track is
+  tolerated (`display-warning`, no POI written) — the hook fires in
+  every project regardless of whether ai-tracks is in use.
 - **Claude Code SessionStart hook** — configured in
   `~/.claude/settings.json`, matcher `startup|resume`. Runs
   `bin/ai-tracks-session-start.sh` which hands the payload to
@@ -159,6 +175,9 @@ need a fresh session to appear.
   `ai-tracks-recap-since` read from the org-roam DB
   (`org-roam-node-properties` returns the drawer as an alist). No file
   I/O unless we're inserting.
+- **JSON `false` decodes to nil**: `ai-tracks--read-payload` sets
+  `:false-object nil`. Default `:false` is a truthy symbol in elisp
+  and silently miscategorises boolean fields.
 - **Commit → github link**: `ai-tracks--parse-github-remote` matches
   the three usual remote-URL shapes; non-github origins yield no link
   (the URL slot is simply omitted). Full SHA in the URL.
@@ -197,6 +216,9 @@ need a fresh session to appear.
   End-of-session).
 - `bin/ai-tracks-goto-track.sh` — jumps Emacs to this session's Track
   (non-blocking).
+- `bin/ai-tracks-plan.sh` — PostToolUse hook wrapper for
+  `ExitPlanMode`; persists the payload to a temp file and hands the
+  path to `ai-tracks-plan-add` (non-blocking).
 - `~/.claude/commands/at/*.md` — slash-command instructions.
 - Loaded via `use-package ai-tracks` in `dmg-ai.org` under
   `** ai-tracks`.
