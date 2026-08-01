@@ -71,8 +71,11 @@ Skeleton (see README.md for a filled-out example):
                                     Open threads, Next)
 ```
 
-Track drawer: `:ID:` (`claude-<uuid>`), `:CLAUDE-CWD:`,
-`:CLAUDE-SOURCE:` (`startup | manual`), `:CLAUDE-STARTED:`.
+Track drawer: `:ID:` (`claude-<uuid>`), `:CLAUDE-CWD:` (wrapped as
+`[[file:/path]]` so org's emphasis parser doesn't italicize `/word/`
+patterns — readers must unwrap via `ai-tracks--unwrap-cwd`, which
+also accepts legacy raw paths), `:CLAUDE-SOURCE:` (`startup |
+manual`), `:CLAUDE-STARTED:`.
 
 Per-category timestamp drawer key (in addition to `:POI-CATEGORY:`):
 

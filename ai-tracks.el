@@ -46,6 +46,24 @@
 doubling any `%' present in an interpolated value keeps it literal."
   (replace-regexp-in-string "%" "%%" (or str "")))
 
+(defun ai-tracks--cwd-as-link (path)
+  "Wrap PATH as an org `file:' link.
+Property values that look like `/word/' are otherwise matched as
+italic by org's emphasis parser and (with `org-hide-emphasis-markers'
+on) display with the delimiter slashes hidden.  Wrapping the path in
+`[[file:...]]' keeps the value clickable and defeats emphasis parsing.
+Returns nil when PATH is nil."
+  (when path (format "[[file:%s]]" path)))
+
+(defun ai-tracks--unwrap-cwd (value)
+  "Return the plain path from a :CLAUDE-CWD: property VALUE.
+Accepts both the current `[[file:/path]]' link form and legacy raw
+paths so older Tracks continue to resolve.  Returns nil for nil."
+  (when value
+    (if (string-match "\\`\\[\\[file:\\(.*\\)\\]\\]\\'" value)
+        (match-string 1 value)
+      value)))
+
 (declare-function ns-do-applescript "nsfns.m")
 
 (defun ai-tracks--raise-emacs ()
@@ -79,7 +97,7 @@ the SessionStart JSON payload; either may be nil."
                       "%%?")
                      (ai-tracks--escape-capture title)
                      (ai-tracks--escape-capture id)
-                     (ai-tracks--escape-capture cwd)
+                     (ai-tracks--escape-capture (ai-tracks--cwd-as-link cwd))
                      (ai-tracks--escape-capture source)
                      (ai-tracks--escape-capture started)))
          (org-roam-capture-templates
@@ -677,8 +695,9 @@ Sorted by :CLAUDE-STARTED: descending (most recent first)."
      (seq-filter
       (lambda (node)
         (and (string-prefix-p "claude-" (org-roam-node-id node))
-             (let ((cwd (cdr (assoc "CLAUDE-CWD"
-                                    (org-roam-node-properties node)))))
+             (let ((cwd (ai-tracks--unwrap-cwd
+                         (cdr (assoc "CLAUDE-CWD"
+                                     (org-roam-node-properties node))))))
                (and cwd
                     (string-prefix-p
                      (file-name-as-directory (expand-file-name cwd))
