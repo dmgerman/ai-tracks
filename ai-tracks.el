@@ -46,6 +46,17 @@
 doubling any `%' present in an interpolated value keeps it literal."
   (replace-regexp-in-string "%" "%%" (or str "")))
 
+(declare-function ns-do-applescript "nsfns.m")
+
+(defun ai-tracks--raise-emacs ()
+  "Bring the current Emacs frame to the foreground and give it focus.
+Called from user-facing entry points so wrappers stay minimal.
+On macOS, activates Emacs.app first via AppleScript so the frame
+comes to the front even when another app has focus."
+  (when (eq system-type 'darwin)
+    (ns-do-applescript "tell application \"Emacs\" to activate"))
+  (select-frame-set-input-focus (selected-frame)))
+
 (defun ai-tracks--capture-session (session-id cwd source)
   "Trigger the org-roam capture for a new AI track.
 SESSION-ID is the Claude Code session UUID.  CWD and SOURCE come from
@@ -53,7 +64,7 @@ the SessionStart JSON payload; either may be nil."
   (unless (bound-and-true-p org-roam-gt-mode)
     (org-roam-gt-mode 1))
   (let* ((now       (current-time))
-         (title     (format-time-string "Track %Y-%m-%d %a %H:%M" now))
+         (title     (format-time-string "Track [%Y-%m-%d %a %H:%M]" now))
          (started   (format-time-string "[%Y-%m-%d %a %H:%M]" now))
          (id        (format "claude-%s" session-id))
          (body      (format
@@ -76,7 +87,8 @@ the SessionStart JSON payload; either may be nil."
              entry ,body
              :target (node+headline nil "AI Tracks")
              :empty-lines 1))))
-    (org-roam-capture-)))
+    (org-roam-capture-)
+    (ai-tracks--raise-emacs)))
 
 ;;;###autoload
 (defun ai-tracks-resume-add (session-id)
@@ -86,7 +98,7 @@ what they intend to accomplish in this resumed session.  Saves the
 buffer immediately."
   (let* ((marker (ai-tracks--track-marker session-id))
          (now   (current-time))
-         (title (format-time-string "Resume %Y-%m-%d %a %H:%M" now))
+         (title (format-time-string "Resume [%Y-%m-%d %a %H:%M]" now))
          (ts    (format-time-string "[%Y-%m-%d %a %H:%M]" now)))
     (switch-to-buffer (marker-buffer marker))
     (goto-char (marker-position marker))
@@ -96,6 +108,7 @@ buffer immediately."
                     title ts))
     (org-reveal)
     (save-buffer)
+    (ai-tracks--raise-emacs)
     ts))
 
 (defun ai-tracks--last-poi-title (session-id)
@@ -218,9 +231,11 @@ Signals a user-error if none is found."
              (when (or (not latest) (string> ts latest))
                (setq latest ts)))))
        nil 'tree))
-    (or latest
-        (user-error "ai-tracks: no boundary timestamp on Track for %s"
-                    session-id))))
+    (prog1
+        (or latest
+            (user-error "ai-tracks: no boundary timestamp on Track for %s"
+                        session-id))
+      (ai-tracks--raise-emacs))))
 
 (defun ai-tracks--recap-format-section (heading items)
   "Return a string for one level-5 recap section with HEADING and ITEMS.
@@ -253,7 +268,7 @@ value."
   (let* ((marker (ai-tracks--track-marker session-id))
          (now   (current-time))
          (title (format-time-string
-                 (concat title-prefix " %Y-%m-%d %a %H:%M") now))
+                 (concat title-prefix " [%Y-%m-%d %a %H:%M]") now))
          (ts    (format-time-string "[%Y-%m-%d %a %H:%M]" now))
          (sections '((files     . "Files touched")
                      (decisions . "Decisions")
@@ -276,6 +291,7 @@ value."
                  (cdr section)
                  (alist-get (car section) payload))))
       (save-buffer))
+    (ai-tracks--raise-emacs)
     ts))
 
 (defun ai-tracks--find-or-create-summary-node (track-marker)
@@ -353,31 +369,229 @@ schema as `ai-tracks-recap-add'."
 ;;;; Point of Interest
 
 (defvar ai-tracks-poi-categories
-  '("Surprise" "Event" "Decision" "Observation" "Other")
+  '("Surprise" "Event" "Decision" "Observation" "Other" "Claude-behaviour")
   "Categories offered when creating a POI via `ai-tracks-poi-add'.")
 
-(defun ai-tracks-poi-add (session-id)
+(defun ai-tracks--jsonl-genuine-user-p (obj)g
+  "Return non-nil if OBJ is a genuine user turn (not a tool_result carrier).
+OBJ is a parsed JSONL entry as an alist.  Recognises two shapes:
+
+  1. `type' = \"user\" with `message.content' either a string or a list
+     containing at least one block with `type' = \"text\".
+  2. `type' = \"queue-operation\", `operation' = \"enqueue\", with a
+     `content' string.  Claude Code emits this when the user submits a
+     message while a turn is in flight; the text is delivered later as
+     a system reminder but never becomes a proper user message."
+  (cond
+   ((equal (alist-get 'type obj) "user")
+    (let* ((msg     (alist-get 'message obj))
+           (content (and (listp msg) (alist-get 'content msg))))
+      (cond
+       ((stringp content) t)
+       ((listp content)
+        (seq-some (lambda (b)
+                    (and (listp b)
+                         (equal (alist-get 'type b) "text")))
+                  content))
+       (t nil))))
+   ((and (equal (alist-get 'type obj) "queue-operation")
+         (equal (alist-get 'operation obj) "enqueue"))
+    (stringp (alist-get 'content obj)))
+   (t nil)))
+
+(defun ai-tracks--jsonl-assistant-text (obj)
+  "Return concatenated text blocks from assistant JSONL entry OBJ, or nil.
+Ignores `thinking' and `tool_use' blocks.  Returns nil for non-assistant
+entries or entries with no text content."
+  (when (equal (alist-get 'type obj) "assistant")
+    (let* ((msg     (alist-get 'message obj))
+           (content (and (listp msg) (alist-get 'content msg)))
+           parts)
+      (when (listp content)
+        (dolist (b content)
+          (when (and (listp b) (equal (alist-get 'type b) "text"))
+            (let ((txt (alist-get 'text b)))
+              (when (stringp txt) (push txt parts))))))
+      (when parts
+        (mapconcat #'identity (nreverse parts) "\n\n")))))
+
+(defun ai-tracks--jsonl-user-text (obj)
+  "Return the text of a genuine user JSONL entry OBJ, or nil.
+Handles the same two shapes as `ai-tracks--jsonl-genuine-user-p':
+a proper user turn (string or text-block-list content), and a
+`queue-operation' enqueue with a `content' string.  Returns nil for
+non-user entries and for tool_result-only user entries."
+  (cond
+   ((equal (alist-get 'type obj) "user")
+    (let* ((msg     (alist-get 'message obj))
+           (content (and (listp msg) (alist-get 'content msg))))
+      (cond
+       ((stringp content) content)
+       ((listp content)
+        (let (parts)
+          (dolist (b content)
+            (when (and (listp b) (equal (alist-get 'type b) "text"))
+              (let ((txt (alist-get 'text b)))
+                (when (stringp txt) (push txt parts)))))
+          (when parts
+            (mapconcat #'identity (nreverse parts) "\n\n"))))
+       (t nil))))
+   ((and (equal (alist-get 'type obj) "queue-operation")
+         (equal (alist-get 'operation obj) "enqueue"))
+    (let ((c (alist-get 'content obj)))
+      (and (stringp c) c)))
+   (t nil)))
+
+(defun ai-tracks--jsonl-entry-epoch (obj)
+  "Return the epoch seconds of OBJ's `timestamp' field, or nil."
+  (let ((ts (alist-get 'timestamp obj)))
+    (when (stringp ts)
+      (condition-case nil
+          (float-time (date-to-time ts))
+        (error nil)))))
+
+(defun ai-tracks--read-jsonl (path)
+  "Parse PATH as JSONL, returning a list of alists newest-first.
+Malformed lines are skipped silently.  Returns nil if PATH is nil or
+unreadable."
+  (when (and path (file-readable-p path))
+    (let (objs)
+      (with-temp-buffer
+        (insert-file-contents path)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let ((line (buffer-substring-no-properties
+                       (line-beginning-position) (line-end-position))))
+            (unless (string-empty-p (string-trim line))
+              (condition-case nil
+                  (push (json-parse-string line
+                                           :object-type 'alist
+                                           :array-type 'list
+                                           :null-object nil)
+                        objs)
+                (json-parse-error nil))))
+          (forward-line 1)))
+      objs)))
+
+(defun ai-tracks--last-exchange (transcript-path &optional cutoff-epoch)
+  "Return a plist describing the last user-prompt / assistant-answer exchange.
+Reads TRANSCRIPT-PATH (a JSONL file).  When CUTOFF-EPOCH is non-nil,
+entries with `timestamp' strictly greater than CUTOFF-EPOCH are
+ignored — this prunes anything Claude wrote in response to the
+slash-command trigger itself (which lands in the transcript before
+Emacs gets a chance to read it).
+
+The plist has:
+  :user       string — text of the genuine user message that triggered
+                       Claude's answer (the one before the slash-command
+                       trigger), or nil if not found.
+  :assistant  string — concatenated `text' blocks from all assistant
+                       messages between the slash-command trigger (if
+                       present) and the previous genuine user message.
+Returns nil when no assistant text can be extracted."
+  (let* ((all-objs (ai-tracks--read-jsonl transcript-path))
+         (objs (if cutoff-epoch
+                   (seq-filter
+                    (lambda (o)
+                      (let ((e (ai-tracks--jsonl-entry-epoch o)))
+                        (or (null e) (<= e cutoff-epoch))))
+                    all-objs)
+                 all-objs))
+         (done nil)
+         (prev-user nil)
+         texts)
+    ;; Walk newest→oldest.  Skip everything (including any consecutive
+    ;; genuine user turns — slash commands leave two: a command-name
+    ;; marker plus a text-body entry) until we start collecting
+    ;; assistant text.  Once we have text, the next genuine user turn
+    ;; is the actual prior prompt.
+    (dolist (obj objs)
+      (unless done
+        (cond
+         ((and texts (ai-tracks--jsonl-genuine-user-p obj))
+          (setq prev-user (ai-tracks--jsonl-user-text obj))
+          (setq done t))
+         (t
+          (when-let ((txt (ai-tracks--jsonl-assistant-text obj)))
+            (push txt texts))))))
+    (when texts
+      (list :user      prev-user
+            :assistant (mapconcat #'identity texts "\n\n")))))
+
+(defun ai-tracks--markdown-to-org (markdown)
+  "Convert MARKDOWN string to org via pandoc.
+Returns a cons (TEXT . WARNING).  WARNING is nil on success; on
+failure TEXT is the original MARKDOWN and WARNING is a short message
+describing what went wrong (missing pandoc or non-zero exit)."
+  (if (not (executable-find "pandoc"))
+      (cons markdown "pandoc not found on PATH; inserted raw markdown")
+    (with-temp-buffer
+      (insert markdown)
+      (let ((exit (condition-case err
+                      (call-process-region
+                       (point-min) (point-max)
+                       "pandoc" t t nil
+                       "-f" "markdown" "-t" "org" "--wrap=preserve")
+                    (error (format "signalled %s" err)))))
+        (cond
+         ((eq exit 0) (cons (buffer-string) nil))
+         ((integerp exit)
+          (cons markdown (format "pandoc exited %s; inserted raw markdown" exit)))
+         (t
+          (cons markdown (format "pandoc %s; inserted raw markdown" exit))))))))
+
+(defun ai-tracks-poi-add (session-id &optional transcript-path cutoff-epoch)
   "Insert a level-4 explicit-POI heading under the Track for SESSION-ID.
-Prompts the user for a category from `ai-tracks-poi-categories' via
-`completing-read', writes :POI-CATEGORY: and :CLAUDE-POI: into the
-drawer, switches to the org file's buffer, and positions point
-immediately after the drawer so the user can type the body."
+Prompts for a category from `ai-tracks-poi-categories', writes the
+drawer, and switches to the org file's buffer.
+
+When TRANSCRIPT-PATH is a readable JSONL file (this session's Claude
+Code transcript), extracts the previous user prompt and Claude's last
+answer via `ai-tracks--last-exchange', converts each markdown→org via
+pandoc, and inserts them as the POI body: the user prompt inside a
+`#+begin_quote' block, followed by Claude's answer.  Point lands on a
+blank line below so the user can add their own commentary.
+
+CUTOFF-EPOCH is a Unix timestamp (seconds); JSONL entries newer than
+this are ignored during extraction.  The wrapper passes its own
+invocation time so Claude's response to the /at:poi trigger itself is
+not pulled into the POI."
   (let* ((marker (ai-tracks--track-marker session-id))
          (category (completing-read
                     "POI category: "
                     ai-tracks-poi-categories
                     nil t))
          (now (current-time))
-         (title (format-time-string "POI %Y-%m-%d %a %H:%M" now))
-         (ts (format-time-string "[%Y-%m-%d %a %H:%M]" now)))
+         (title (format-time-string "POI [%Y-%m-%d %a %H:%M]" now))
+         (ts (format-time-string "[%Y-%m-%d %a %H:%M]" now))
+         (exchange (and transcript-path
+                        (ai-tracks--last-exchange transcript-path cutoff-epoch)))
+         (user-md      (plist-get exchange :user))
+         (assistant-md (plist-get exchange :assistant))
+         (user-conv      (and user-md      (ai-tracks--markdown-to-org user-md)))
+         (assistant-conv (and assistant-md (ai-tracks--markdown-to-org assistant-md)))
+         warnings)
     (switch-to-buffer (marker-buffer marker))
     (goto-char (marker-position marker))
     (goto-char (save-excursion (org-end-of-subtree t t)))
     (unless (bolp) (insert "\n"))
     (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: %s\n:CLAUDE-POI: %s\n:END:\n"
                     title category ts))
+    (when user-conv
+      (insert "#+begin_quote\n")
+      (let ((body (string-trim-right (car user-conv))))
+        (insert body "\n"))
+      (insert "#+end_quote\n\n")
+      (when (cdr user-conv) (push (cdr user-conv) warnings)))
+    (when assistant-conv
+      (let ((body (string-trim-right (car assistant-conv))))
+        (insert body "\n\n"))
+      (when (cdr assistant-conv) (push (cdr assistant-conv) warnings)))
     (org-reveal)
     (save-buffer)
+    (when warnings
+      (message "ai-tracks: %s" (mapconcat #'identity (nreverse warnings) "; ")))
+    (ai-tracks--raise-emacs)
     ts))
 
 ;;;; Magit / commit integration

@@ -13,6 +13,9 @@ to the project they belong to.
   (provides the `node+headline` capture target).
 - Claude Code (for the SessionStart hook and slash commands).
 - `magit` (optional — for the commit-tracking minor mode).
+- `pandoc` (optional — used by `/at:poi` to convert Claude's last
+  answer from markdown to org; without it, the raw markdown is
+  inserted and a warning is shown in the minibuffer).
 
 ## Installation
 
@@ -140,8 +143,12 @@ Categories:
 | `/at:track-start` | Manually create a Track for the current session (if the SessionStart hook didn't fire or you cancelled it). |
 | `/at:recap` | Ask Claude to summarise work since the last boundary and append a Recap POI. |
 | `/at:end-session` | Final wrap-up: appends an `End of session …` POI and grows the rolling Summary node. Run this before you close Claude. |
-| `/at:poi` | Opens an interactive POI capture in Emacs — pick a category, type your note. |
+| `/at:poi` | Opens an interactive POI capture in Emacs — pick a category. The previous user prompt and Claude's last answer are pulled verbatim from the session's JSONL transcript, converted markdown→org via pandoc, and inserted as the POI body; point lands on a blank line below for your own commentary. Requires `pandoc` on `PATH` for the conversion (raw markdown is inserted with a minibuffer warning if pandoc is missing). |
 | `/at:resume` | Append a Resume POI. Normally auto-fired on resume; only invoked manually during the missing-end-of-session recovery flow. |
+
+Every wrapper raises the Emacs GUI frame to the foreground when it
+finishes, so if you're focused on the terminal when a command runs,
+Emacs comes forward to show you the resulting POI or capture prompt.
 
 ## Typical workflow
 
@@ -172,12 +179,16 @@ Categories:
 
 ## What the org file looks like
 
-```
-* <your node title>                          (level 1, org-roam node)
-** AI Tracks                                 (level 2, plain)
-*** Track 2026-07-30 Thu 06:53 <intention>   (level 3, :ID: claude-<uuid>)
+Dates in POI titles are wrapped in `[]` so org-mode parses them as
+inactive timestamps (they show up in agenda date searches, sparse
+trees, etc.).
 
-**** Summary                                 (rolling per-Track)
+```
+* <your node title>                            (level 1, org-roam node)
+** AI Tracks                                   (level 2, plain)
+*** Track [2026-07-30 Thu 06:53] <intention>   (level 3, :ID: claude-<uuid>)
+
+**** Summary                                   (rolling per-Track)
      :PROPERTIES:
      :POI-CATEGORY:      Summary
      :CLAUDE-SUMMARIZED: [2026-07-31 Fri 09:15]
@@ -190,20 +201,27 @@ Categories:
      [2026-07-31 Fri 09:15]:
      - accomplished 3
 
-**** Recap 2026-07-30 Thu 07:23              (mid-session recap)
+**** Recap [2026-07-30 Thu 07:23]              (mid-session recap)
      - narrative summary bullets
 ***** Files touched
 ***** Decisions
 ***** Open threads
 ***** Next
 
-**** POI 2026-07-30 Thu 07:34                (explicit observation)
+**** POI [2026-07-30 Thu 07:34]                (explicit observation)
      :PROPERTIES:
      :POI-CATEGORY: Observation
      :END:
+
+     #+begin_quote
+     <the previous user prompt, from the JSONL transcript>
+     #+end_quote
+
+     <Claude's last answer, pandoc'd markdown→org>
+
      <your typed note>
 
-**** Commit abc123 — Fix parser bug          (from magit)
+**** Commit abc123 — Fix parser bug            (from magit)
      [[https://github.com/OWNER/REPO/commit/<sha>]]
 
      <full commit body>
@@ -211,9 +229,9 @@ Categories:
      - path/a
      - path/b
 
-**** End of session 2026-07-30 Thu 09:04     (final recap of the leg)
+**** End of session [2026-07-30 Thu 09:04]     (final recap of the leg)
 
-**** Resume 2026-07-31 Fri 08:00             (start of a new leg)
+**** Resume [2026-07-31 Fri 08:00]             (start of a new leg)
      <your typed intention for this resumed leg>
 ```
 
