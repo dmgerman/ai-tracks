@@ -594,6 +594,22 @@ not pulled into the POI."
     (ai-tracks--raise-emacs)
     ts))
 
+;;;; Navigation
+
+(declare-function org-roam-node-from-id "org-roam-node")
+(declare-function org-roam-node-visit   "org-roam-node")
+
+;;;###autoload
+(defun ai-tracks-goto-track (session-id)
+  "Visit the Track for SESSION-ID via org-roam node navigation.
+Signals a user-error if no Track is registered for this session."
+  (let* ((id   (format "claude-%s" session-id))
+         (node (org-roam-node-from-id id)))
+    (unless node
+      (user-error "ai-tracks: no Track with ID %s; run /at:track-start first" id))
+    (org-roam-node-visit node)
+    (ai-tracks--raise-emacs)))
+
 ;;;; Magit / commit integration
 
 (declare-function magit-toplevel     "magit-git")
@@ -641,7 +657,7 @@ Accepts SSH, HTTPS, and ssh:// forms and strips a trailing .git."
           :body    (mapconcat #'identity
                               (magit-git-lines "log" "-1" "--pretty=%b" "HEAD")
                               "\n")
-          :author  (magit-git-string "log" "-1" "--pretty=%aN" "HEAD")
+          :author  (magit-git-string "log" "-1" "--pretty=%aN <%aE>" "HEAD")
           :files   (magit-git-lines "show" "--name-only"
                                     "--pretty=format:" "HEAD"))))
 

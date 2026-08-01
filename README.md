@@ -68,7 +68,8 @@ directory**:
       "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-recap.sh *)",
       "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-end-session.sh *)",
       "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-poi.sh *)",
-      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-resume.sh *)"
+      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-resume.sh *)",
+      "Bash(/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-goto-track.sh *)"
     ]
   }
 }
@@ -145,6 +146,7 @@ Categories:
 | `/at:end-session` | Final wrap-up: appends an `End of session …` POI and grows the rolling Summary node. Run this before you close Claude. |
 | `/at:poi` | Opens an interactive POI capture in Emacs — pick a category. The previous user prompt and Claude's last answer are pulled verbatim from the session's JSONL transcript, converted markdown→org via pandoc, and inserted as the POI body; point lands on a blank line below for your own commentary. Requires `pandoc` on `PATH` for the conversion (raw markdown is inserted with a minibuffer warning if pandoc is missing). |
 | `/at:resume` | Append a Resume POI. Normally auto-fired on resume; only invoked manually during the missing-end-of-session recovery flow. |
+| `/at:goto-track` | Jump Emacs to this session's Track (uses org-roam node navigation). |
 
 Every wrapper raises the Emacs GUI frame to the foreground when it
 finishes, so if you're focused on the terminal when a command runs,
@@ -247,8 +249,9 @@ if you want to test or script it. See `bin/`:
   session id as `$1` (defaults to `$CLAUDE_CODE_SESSION_ID`).
 - `ai-tracks-recap-since.sh` — prints the boundary timestamp for
   the given session.
-- `ai-tracks-poi.sh`, `ai-tracks-resume.sh` — fire an interactive
-  capture in Emacs; no stdin, session id as `$1`.
+- `ai-tracks-poi.sh`, `ai-tracks-resume.sh`, `ai-tracks-goto-track.sh`
+  — fire an interactive capture / navigation in Emacs; no stdin,
+  session id as `$1`.
 
 ## Troubleshooting
 

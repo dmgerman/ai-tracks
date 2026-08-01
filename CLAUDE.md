@@ -106,6 +106,7 @@ need a fresh session to appear.
 | `/at:end-session` | `ai-tracks-end-session-add` | Final wrap-up right before the session ends. Same shape as recap. |
 | `/at:resume` | `ai-tracks-resume-add` | Append a Resume POI. Normally auto-fired by the SessionStart hook on `source: resume`; only invoked manually by Claude during the missing-end-of-session recovery flow (see below). |
 | `/at:poi` | `ai-tracks-poi-add` | User-typed observation ("explicit POI" in module vocabulary). Emacs prompts for category and puts point in the org file. |
+| `/at:goto-track` | `ai-tracks-goto-track` | Jump Emacs to this session's Track via `org-roam-node-visit`. |
 
 ### Automatic triggers
 
@@ -191,6 +192,8 @@ need a fresh session to appear.
 - `bin/ai-tracks-resume.sh` — fires a Resume POI capture in Emacs
   (non-blocking; normally invoked only during recovery from a missing
   End-of-session).
+- `bin/ai-tracks-goto-track.sh` — jumps Emacs to this session's Track
+  (non-blocking).
 - `~/.claude/commands/at/*.md` — slash-command instructions.
 - Loaded via `use-package ai-tracks` in `dmg-ai.org` under
   `** ai-tracks`.
