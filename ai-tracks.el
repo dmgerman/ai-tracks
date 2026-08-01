@@ -320,13 +320,19 @@ value."
   "Return a marker at the Summary heading under the Track at TRACK-MARKER.
 Creates a level-4 `Summary' heading as the first child of the Track
 if it doesn't already exist.  The new heading carries
-:POI-CATEGORY: Summary and an initially-blank :CLAUDE-SUMMARIZED:."
+:POI-CATEGORY: Summary and an initially-blank :CLAUDE-SUMMARIZED:.
+The heading title format is `Summary [<date>]' where the date is
+the time the Summary node was created; the drawer's
+:CLAUDE-SUMMARIZED: is refreshed on every append.  The lookup
+regex accepts both the current `Summary [...]' form and the
+legacy bare `Summary' from older Tracks."
   (org-with-point-at track-marker
     (save-restriction
       (org-narrow-to-subtree)
       (goto-char (point-min))
       (let ((existing (save-excursion
-                        (when (re-search-forward "^\\*\\{4\\} Summary$" nil t)
+                        (when (re-search-forward
+                               "^\\*\\{4\\} Summary\\(?: \\[.*\\]\\)?$" nil t)
                           (line-beginning-position)))))
         (if existing
             (progn (goto-char existing) (point-marker))
@@ -338,8 +344,9 @@ if it doesn't already exist.  The new heading carries
                                (point-max)))))
             (goto-char insert-at)
             (unless (bolp) (insert "\n"))
-            (let ((heading-start (point)))
-              (insert "**** Summary\n"
+            (let ((heading-start (point))
+                  (ts (format-time-string "[%Y-%m-%d %a %H:%M]" (current-time))))
+              (insert (format "**** Summary %s\n" ts)
                       ":PROPERTIES:\n"
                       ":POI-CATEGORY: Summary\n"
                       ":CLAUDE-SUMMARIZED: \n"
@@ -379,13 +386,17 @@ See `ai-tracks--insert-recap-like' for the JSON schema."
 The End-of-session POI is semantically a Recap (same category and
 drawer key) with a different title.  Additionally, the `summary'
 bullets are appended as a new dated group to the Track's Summary
-node (created as the first level-4 child on demand).  Same JSON
-schema as `ai-tracks-recap-add'."
+node (created as the first level-4 child on demand), and the most
+recent Plan POI (if any) gets `:PLAN-FINISHED-AT:' stamped so
+outstanding plans are recorded as done at the wrap-up moment.
+Same JSON schema as `ai-tracks-recap-add'."
   (let* ((payload (ai-tracks--read-payload json-file))
          (ts (ai-tracks--insert-recap-like
               session-id payload
-              "End of session" "CLAUDE-RECAPPED" "Recap")))
+              "End of session" "CLAUDE-RECAPPED" "Recap"))
+         (marker (ai-tracks--track-marker session-id)))
     (ai-tracks--append-to-summary session-id (alist-get 'summary payload))
+    (ai-tracks--mark-last-plan-poi-finished marker ts)
     ts))
 
 ;;;; Point of Interest
@@ -630,31 +641,67 @@ not pulled into the POI."
 
 ;;;; Plan (Claude Code ExitPlanMode PostToolUse hook)
 
-(defun ai-tracks--plan-classify (tool-response)
-  "Classify a plan submission from TOOL-RESPONSE (parsed alist).
-Returns one of \"accepted\", \"rejected\", or \"edited\".
+(defun ai-tracks--tool-response-content-string (tool-response)
+  "Return TOOL-RESPONSE's `content' field flattened to a string, or nil.
+The `content' field can be either a bare string or a list of
+`{type, text}' blocks (Anthropic tool-result shape); this normalises
+both to plain text by concatenating the `text' blocks with two
+newlines.  Returns nil when there is no content."
+  (when (listp tool-response)
+    (let ((c (alist-get 'content tool-response)))
+      (cond
+       ((stringp c) c)
+       ((listp c)
+        (let (parts)
+          (dolist (block c)
+            (when (and (listp block)
+                       (equal (alist-get 'type block) "text"))
+              (when-let ((txt (alist-get 'text block)))
+                (push txt parts))))
+          (when parts
+            (mapconcat #'identity (nreverse parts) "\n\n"))))
+       (t nil)))))
 
-Heuristic — Claude Code's exact response shape for `ExitPlanMode' is
-not documented; we look at the fields the binary is known to emit
-on success (`data.plan', `data.filePath', `data.planWasEdited') and
-common rejection markers (`isError'), and fall through to
-\"accepted\" for any unrecognised shape."
-  (let* ((data (and (listp tool-response)
-                    (alist-get 'data tool-response)))
-         (edited (or (and (listp data) (alist-get 'planWasEdited data))
-                     (and (listp tool-response)
-                          (alist-get 'planWasEdited tool-response))))
-         (is-error (and (listp tool-response)
-                        (alist-get 'isError tool-response)))
-         (has-plan-shape
-          (and (listp data)
-               (or (alist-get 'plan data)
-                   (alist-get 'filePath data)))))
-    (cond
-     (edited "edited")
-     (is-error "rejected")
-     (has-plan-shape "accepted")
-     (t "accepted"))))
+(defun ai-tracks--parse-plan-file-path (content-string)
+  "Return the plan file path referenced in CONTENT-STRING, or nil.
+Claude Code's ExitPlanMode tool result prefixes the plan with a
+line like `Your plan has been saved to: /path/to/<slug>.md'."
+  (when (and (stringp content-string)
+             (string-match "saved to: \\(\\S-+\\.md\\)" content-string))
+    (match-string 1 content-string)))
+
+(defun ai-tracks--newest-plan-file ()
+  "Return the path of the newest `.md' file in `~/.claude/plans/', or nil.
+Fallback used when the tool-response content lacks a parseable
+`saved to:' line."
+  (let ((dir (expand-file-name "~/.claude/plans/")))
+    (when (file-directory-p dir)
+      (car (sort (directory-files dir t "\\.md\\'")
+                 (lambda (a b)
+                   (time-less-p
+                    (file-attribute-modification-time (file-attributes b))
+                    (file-attribute-modification-time (file-attributes a)))))))))
+
+(defun ai-tracks--plan-classify (content-string)
+  "Classify a plan submission from tool-response CONTENT-STRING.
+Returns \"accepted\", \"rejected\", or \"edited\".
+
+Heuristic on the visible prose Claude Code emits back to the LLM:
+  - \"rejected\", \"did not approve\", or \"doesn't want to proceed\"
+    anywhere in the content → \"rejected\"
+  - \"edited\" (case-insensitive) or `planWasEdited: true' → \"edited\"
+  - default → \"accepted\" (the common case and safest fallback,
+    since a mislabelled acceptance is fixed by the next re-plan
+    via update-in-place)"
+  (cond
+   ((not (stringp content-string)) "accepted")
+   ((string-match-p "rejected\\|did not approve\\|doesn't want to proceed\\|does not want to proceed"
+                    content-string)
+    "rejected")
+   ((string-match-p "\\bedited\\b\\|planWasEdited[^n]*[tT]"
+                    content-string)
+    "edited")
+   (t "accepted")))
 
 (defun ai-tracks--plan-title-from-markdown (plan-md)
   "Return the text of the first `#'-prefixed line in PLAN-MD, or nil.
@@ -684,6 +731,26 @@ No-op when the first non-blank line is not a heading."
                        (progn (forward-line 1) (point))))
       (buffer-string))))
 
+(defun ai-tracks--read-trailing-plan-poi-drawer (marker)
+  "If the bottommost level-4 POI under MARKER is a Plan POI, return
+its revision-relevant drawer keys as an alist:
+
+  (revisions        . <string, may be nil>)
+  (first-submitted  . <string, may be nil>)
+  (previous-status  . <string, may be nil — the prior :POI-SUB-CATEGORY:>)
+
+Returns nil when the trailing POI is not a Plan POI (which is the
+initial-plan case for the caller: no prior to carry over)."
+  (org-with-point-at marker
+    (save-restriction
+      (org-narrow-to-subtree)
+      (goto-char (point-max))
+      (when (re-search-backward "^\\*\\{4\\} " nil t)
+        (when (equal (org-entry-get (point) "POI-CATEGORY") "Plan")
+          (list (cons 'revisions       (org-entry-get (point) "PLAN-REVISIONS"))
+                (cons 'first-submitted (org-entry-get (point) "PLAN-FIRST-SUBMITTED"))
+                (cons 'previous-status (org-entry-get (point) "POI-SUB-CATEGORY"))))))))
+
 (defun ai-tracks--delete-trailing-plan-poi (marker)
   "Delete the bottommost level-4 POI under MARKER if it is a Plan POI.
 Returns non-nil if a POI was deleted."
@@ -698,6 +765,55 @@ Returns non-nil if a POI was deleted."
             (delete-region beg end)
             t))))))
 
+(defun ai-tracks--mark-last-plan-poi-finished (marker &optional ts)
+  "Walk backward under MARKER's subtree to the most recent Plan POI
+and stamp `:PLAN-FINISHED-AT: TS' on it (defaulting to now) unless
+the key is already set.  No-op if no Plan POI exists.  Called from
+two places:
+  1. `ai-tracks-plan-add' when the incoming ExitPlanMode is a new
+     plan (prior sub-category was `accepted' or `edited'), before
+     appending the fresh POI — the outgoing plan is thus recorded
+     as done at the moment the next one starts.
+  2. `ai-tracks-end-session-add' — end-of-session stamps any
+     outstanding Plan POI as finished at the wrap-up time."
+  (let ((stamp (or ts (format-time-string "[%Y-%m-%d %a %H:%M]"))))
+    (org-with-point-at marker
+      (save-restriction
+        (org-narrow-to-subtree)
+        (goto-char (point-max))
+        (let (done)
+          (while (and (not done)
+                      (re-search-backward "^\\*\\{4\\} " nil t))
+            (when (equal (org-entry-get (point) "POI-CATEGORY") "Plan")
+              (setq done t)
+              (unless (org-entry-get (point) "PLAN-FINISHED-AT")
+                (org-entry-put (point) "PLAN-FINISHED-AT" stamp)
+                (save-buffer)))))))))
+
+(defun ai-tracks--plan-read-markdown (content-string)
+  "Return the plan markdown from disk for the current ExitPlanMode fire.
+CONTENT-STRING is `tool_response.content' flattened by
+`ai-tracks--tool-response-content-string'.  We prefer to extract
+the plan file path from that string (Claude Code emits a
+`Your plan has been saved to: <path>' line) and read from disk; if
+the regex misses, we fall back to the newest file in
+`~/.claude/plans/'.  Returns nil when neither path yields a
+readable file.
+
+Reading from disk rather than parsing the plan out of the content
+prose is deliberate: the disk file is canonical; the content prose
+also carries the plan verbatim but is bracketed by human-facing
+framing (`## Approved Plan:', etc.) that would need stripping."
+  (let* ((from-content (ai-tracks--parse-plan-file-path content-string))
+         (path (or (and from-content
+                        (file-readable-p from-content)
+                        from-content)
+                   (ai-tracks--newest-plan-file))))
+    (when (and path (file-readable-p path))
+      (with-temp-buffer
+        (insert-file-contents path)
+        (buffer-string)))))
+
 ;;;###autoload
 (defun ai-tracks-plan-add (json-file)
   "Insert or update a Plan POI under the Track for the session in JSON-FILE.
@@ -705,41 +821,50 @@ JSON-FILE is a path to a Claude Code PostToolUse hook payload for the
 `ExitPlanMode' tool; it is read and deleted.
 
 Payload fields consulted:
-  session_id                                the Track's Claude UUID.
-  tool_input.plan                           plan markdown (injected
-                                            from disk by Claude Code's
-                                            normalizeToolInput step).
-  tool_response.data.plan / .filePath /
-    .planWasEdited                          drive the sub-category
-                                            classification via
-                                            `ai-tracks--plan-classify'.
+  session_id                             the Track's Claude UUID.
+  tool_response.content                  the tool result text sent
+                                         back to the LLM.  We extract
+                                         the plan file path from this
+                                         string (a `Your plan has been
+                                         saved to: <path>' line
+                                         emitted by Claude Code) and
+                                         then read the plan markdown
+                                         from disk.  The same string
+                                         drives sub-category
+                                         classification via
+                                         `ai-tracks--plan-classify'.
+
+The tool `input' visible to hooks is empty (`{}') — the LLM invokes
+`ExitPlanMode' with no arguments and Claude Code assembles the plan
+internally from the on-disk file.  Do not look for the plan in
+`tool_input'.
 
 If the bottommost level-4 POI under the Track already has
 :POI-CATEGORY: Plan, it is deleted first — this is how re-plans
 overwrite the prior plan in place.  A fresh POI is then appended.
 
-The POI title is the first `#'-prefixed line of the plan markdown
+POI title is the first `#'-prefixed line of the plan markdown
 with the `#'s stripped, or (fallback) `Plan [<date>]' when the plan
-carries no heading.  The body is the remainder of the markdown,
-converted to org via pandoc with `--shift-heading-level-by=4' so any
-headings become level-5 sub-sections of the POI rather than
-top-level siblings of the surrounding org tree.
+carries no heading.  Body is the remainder, converted to org via
+pandoc with `--shift-heading-level-by=4' so any headings become
+level-5 sub-sections of the POI rather than top-level siblings.
 
 Drawer keys written:
   :POI-CATEGORY:      Plan
   :POI-SUB-CATEGORY:  accepted | rejected | edited
   :CLAUDE-PLANNED:    inactive timestamp.
 
-Missing-Track case: emits a warning via `display-warning' and
-returns nil.  The hook must tolerate projects without ai-tracks
-Tracks because Claude Code fires PostToolUse unconditionally."
+Missing-Track case: warns via `display-warning' and returns nil.
+Missing-plan-content case (no path parseable, no fallback file):
+same treatment.  The hook must tolerate both because Claude Code
+fires PostToolUse unconditionally."
   (interactive "fClaude Code PostToolUse JSON file: ")
   (let* ((payload    (ai-tracks--read-payload json-file))
          (session-id (alist-get 'session_id payload))
-         (tool-input (alist-get 'tool_input payload))
          (tool-resp  (alist-get 'tool_response payload))
-         (plan-md    (and (listp tool-input) (alist-get 'plan tool-input)))
-         (sub-cat    (ai-tracks--plan-classify tool-resp))
+         (content    (ai-tracks--tool-response-content-string tool-resp))
+         (plan-md    (ai-tracks--plan-read-markdown content))
+         (sub-cat    (ai-tracks--plan-classify content))
          (title-text (ai-tracks--plan-title-from-markdown plan-md))
          (marker     (condition-case _
                          (and (stringp session-id)
@@ -757,33 +882,141 @@ Tracks because Claude Code fires PostToolUse unconditionally."
                 (not (string-empty-p (string-trim plan-md)))))
       (display-warning
        'ai-tracks
-       (format "No plan content in payload for session %s; Plan POI skipped"
+       (format "No plan content on disk for session %s; Plan POI skipped"
                session-id)
        :warning)
       nil)
      (t
       (let* ((now      (current-time))
              (ts       (format-time-string "[%Y-%m-%d %a %H:%M]" now))
-             (fallback (format-time-string "Plan [%Y-%m-%d %a %H:%M]" now))
+             (prefix   (format-time-string "Plan [%Y-%m-%d %a %H:%M]" now))
              (title    (if (and title-text (not (string-empty-p title-text)))
-                           title-text
-                         fallback))
+                           (concat prefix " " title-text)
+                         prefix))
              (body-md  (ai-tracks--plan-strip-first-heading plan-md))
              (conv     (ai-tracks--markdown-to-org body-md 4))
-             (body-org (string-trim-right (or (car conv) ""))))
-        (ai-tracks--delete-trailing-plan-poi marker)
+             (body-org (string-trim-right (or (car conv) "")))
+             ;; Decide whether this fire is a revision of the
+             ;; trailing Plan POI or a genuinely new plan.  Rule:
+             ;; the trailing POI's :POI-SUB-CATEGORY: is `rejected'
+             ;; iff Claude Code is expected to re-plan → revision.
+             ;; `accepted' and `edited' are terminal from the
+             ;; user's perspective; a fresh ExitPlanMode after
+             ;; either is a new plan.  When there is no trailing
+             ;; Plan POI at all, this is an initial plan (also
+             ;; treated as append, but with no prior to finish).
+             (prior         (ai-tracks--read-trailing-plan-poi-drawer marker))
+             (prior-status  (and prior (alist-get 'previous-status prior)))
+             (is-revision   (equal prior-status "rejected"))
+             ;; Revision-only bookkeeping (values default so the
+             ;; new-plan / initial-plan branch just gets rev=1 and
+             ;; first-submitted=now).
+             (prev-revs     (and is-revision
+                                 (let ((v (alist-get 'revisions prior)))
+                                   (and v (string-to-number v)))))
+             (rev-count     (if is-revision (1+ (or prev-revs 0)) 1))
+             (first-sub     (or (and is-revision
+                                     (alist-get 'first-submitted prior))
+                                ts))
+             (prev-stat     (and is-revision prior-status)))
+        (cond
+         (is-revision
+          (ai-tracks--delete-trailing-plan-poi marker))
+         (prior
+          ;; New plan after an accepted/edited prior — stamp the
+          ;; prior as finished before appending.
+          (ai-tracks--mark-last-plan-poi-finished marker ts)))
         (org-with-point-at marker
           (goto-char (save-excursion (org-end-of-subtree t t)))
           (unless (bolp) (insert "\n"))
-          (insert (format
-                   "**** %s\n:PROPERTIES:\n:POI-CATEGORY: Plan\n:POI-SUB-CATEGORY: %s\n:CLAUDE-PLANNED: %s\n:END:\n"
-                   title sub-cat ts))
-          (unless (string-empty-p body-org)
-            (insert body-org "\n"))
-          (save-buffer))
+          (let ((heading-start (point)))
+            (insert (format "**** %s\n:PROPERTIES:\n" title))
+            (insert (format ":POI-CATEGORY: Plan\n"))
+            (insert (format ":POI-SUB-CATEGORY: %s\n" sub-cat))
+            (insert (format ":PLAN-REVISIONS: %d\n" rev-count))
+            (insert (format ":PLAN-FIRST-SUBMITTED: %s\n" first-sub))
+            (when prev-stat
+              (insert (format ":PLAN-PREVIOUS-STATUS: %s\n" prev-stat)))
+            (insert (format ":CLAUDE-PLANNED: %s\n:END:\n" ts))
+            (unless (string-empty-p body-org)
+              (insert body-org "\n"))
+            (save-buffer)
+            ;; Fold so the Plan POI shows only its heading and any
+            ;; sub-headings (from `##'-in-plan → level-5+ after
+            ;; pandoc's --shift-heading-level-by=4), hiding their
+            ;; bodies.  Keeps the Track scannable.
+            (goto-char heading-start)
+            (outline-hide-subtree)
+            (outline-show-branches)))
         (when (cdr conv)
           (message "ai-tracks: %s" (cdr conv)))
         ts)))))
+
+;;;; Empty POI (user-invoked from Emacs, not via a slash command)
+
+(defun ai-tracks--enclosing-track-marker ()
+  "Return a marker at the enclosing Track heading, or nil.
+Walks up from point to the nearest level-3 heading and checks that
+its `:ID:' starts with `claude-'; nil otherwise.  A nil return
+means point is not inside an ai-tracks Track."
+  (save-excursion
+    (when (ignore-errors (org-back-to-heading t) t)
+      (while (and (> (or (org-current-level) 0) 3)
+                  (org-up-heading-safe)))
+      (when (and (equal (org-current-level) 3)
+                 (let ((id (org-entry-get (point) "ID")))
+                   (and id (string-prefix-p "claude-" id))))
+        (point-marker)))))
+
+(defun ai-tracks-add-poi (track-marker category)
+  "Insert an empty level-4 POI under the Track at TRACK-MARKER with CATEGORY.
+Non-interactive workhorse for `ai-tracks-poi-new'; also callable
+from other elisp when the Track marker and category are already
+known.
+
+Appends the POI at the end of the Track subtree with title
+`POI [<date>]', a properties drawer carrying `:POI-CATEGORY:'
+CATEGORY and `:CLAUDE-POI:' <timestamp>, and no body.  Saves the
+buffer.
+
+Returns a marker at the end of the POI's title line (positioned at
+the trailing newline, i.e. immediately after the closing `]' of the
+timestamp) so callers can `goto-char' it to land point on the title
+for further editing."
+  (let* ((now (current-time))
+         (title (format-time-string "POI [%Y-%m-%d %a %H:%M]" now))
+         (ts    (format-time-string "[%Y-%m-%d %a %H:%M]" now))
+         end-of-title)
+    (org-with-point-at track-marker
+      (goto-char (save-excursion (org-end-of-subtree t t)))
+      (unless (bolp) (insert "\n"))
+      (insert (format "**** %s" title))
+      (setq end-of-title (point-marker))
+      (insert (format "\n:PROPERTIES:\n:POI-CATEGORY: %s\n:CLAUDE-POI: %s\n:END:\n"
+                      category ts))
+      (save-buffer))
+    end-of-title))
+
+;;;###autoload
+(defun ai-tracks-poi-new (category)
+  "Append an empty POI under the enclosing Track and drop point on its title.
+Prompts for CATEGORY from `ai-tracks-poi-categories'.  Signals a
+`user-error' if point is not inside an ai-tracks Track (i.e. not
+inside a level-3 heading whose `:ID:' starts with `claude-').
+
+After insertion, point lands on the title line right after the
+`]' of the timestamp, so typing continues the title inline.  Use
+this when you want to jot a POI while editing the Track buffer
+directly, without going through Claude and `/at:poi'."
+  (interactive
+   (list (completing-read "POI category: "
+                          ai-tracks-poi-categories nil t)))
+  (let ((track-marker (ai-tracks--enclosing-track-marker)))
+    (unless track-marker
+      (user-error "ai-tracks: point is not inside an ai-tracks Track"))
+    (let ((end-of-title (ai-tracks-add-poi track-marker category)))
+      (goto-char end-of-title)
+      (ai-tracks--raise-emacs))))
 
 ;;;; Navigation
 
@@ -911,12 +1144,14 @@ entry so the user can add or edit, and saves the buffer immediately."
     (goto-char pos)
     (goto-char (save-excursion (org-end-of-subtree t t)))
     (unless (bolp) (insert "\n"))
-    (let ((now (current-time)))
+    (let* ((now (current-time))
+           (ts  (format-time-string "[%Y-%m-%d %a %H:%M]" now)))
       (insert (format
-               "**** Commit %s — %s\n:PROPERTIES:\n:POI-CATEGORY: Commit\n:CLAUDE-COMMIT: %s\n:COMMIT-SHA: %s\n:COMMIT-AUTHOR: %s\n:END:\n"
+               "**** Commit %s %s — %s\n:PROPERTIES:\n:POI-CATEGORY: Commit\n:CLAUDE-COMMIT: %s\n:COMMIT-SHA: %s\n:COMMIT-AUTHOR: %s\n:END:\n"
+               ts
                (or (plist-get info :short) "")
                (or (plist-get info :subject) "")
-               (format-time-string "[%Y-%m-%d %a %H:%M]" now)
+               ts
                (or (plist-get info :sha) "")
                (or (plist-get info :author) ""))))
     (when-let ((url (plist-get info :url)))

@@ -31,6 +31,7 @@ Clone the module into `~/.emacs.d/modules/ai-tracks/` and load it with
              ai-tracks-recap-since
              ai-tracks-recap-add
              ai-tracks-poi-add
+             ai-tracks-poi-new
              ai-tracks-resume-add
              ai-tracks-magit-mode))
 ```
@@ -147,7 +148,7 @@ Categories:
 | `Recap` | `/at:recap` (mid-session) or `/at:end-session` (final wrap-up, title `End of session …`) |
 | `Resume` | Auto: SessionStart hook fires with `source: resume` |
 | `Commit` | Auto: `ai-tracks-magit-mode` on a magit commit |
-| `Plan` | Auto: PostToolUse hook on `ExitPlanMode`. The POI is created — and updated in place on re-plan — every time Claude submits a plan for approval. The `:POI-SUB-CATEGORY:` records `accepted`, `rejected`, or `edited` based on what the user did. Title is the plan's own first `#` heading (fallback `Plan [<date>]`). |
+| `Plan` | Auto: PostToolUse hook on `ExitPlanMode`. The POI is created every time Claude submits a plan for approval. Rule: if the trailing Plan POI is `rejected`, the incoming fire is a *revision* — it overwrites in place, bumping `:PLAN-REVISIONS:` (carries `:PLAN-FIRST-SUBMITTED:` across revisions and records the prior status in `:PLAN-PREVIOUS-STATUS:`). If the trailing Plan is `accepted` or `edited`, the incoming fire is a *new plan* — it appends a fresh POI and stamps `:PLAN-FINISHED-AT:` on the prior one. `/at:end-session` stamps `:PLAN-FINISHED-AT:` on the most recent Plan POI. Absence of `:PLAN-FINISHED-AT:` means "still in flight". `:POI-SUB-CATEGORY:` records `accepted` / `rejected` / `edited`. Title is the plan's own first `#` heading prefixed with `Plan [<date>]` (fallback `Plan [<date>]` when the plan carries no heading). |
 | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `/at:poi` (you pick from the list) |
 | `Summary` | Auto on every `/at:end-session` — appended to a rolling Summary heading at the top of the Track |
 
@@ -165,6 +166,18 @@ Categories:
 Every wrapper raises the Emacs GUI frame to the foreground when it
 finishes, so if you're focused on the terminal when a command runs,
 Emacs comes forward to show you the resulting POI or capture prompt.
+
+## Adding a POI directly from Emacs
+
+`M-x ai-tracks-poi-new` — invoked from inside a Track subtree,
+prompts for a category from the closed set, and appends an empty
+`**** POI [<date>]` heading at the end of the Track with the drawer
+filled in.  Point lands on the title line right after the `]` so
+you can extend the title inline before typing the body.  Signals a
+`user-error` when point is outside a Track.
+
+Use when you want to record a POI while editing the org file
+directly, without going through Claude and `/at:poi`.
 
 ## Typical workflow
 
@@ -245,11 +258,15 @@ trees, etc.).
      - path/a
      - path/b
 
-**** Refactor the parser                       (Plan POI, title from `# ...`)
+**** Plan [2026-07-30 Thu 08:12] Refactor the parser   (title = timestamp + first `#`)
      :PROPERTIES:
-     :POI-CATEGORY:      Plan
-     :POI-SUB-CATEGORY:  accepted
-     :CLAUDE-PLANNED:    [2026-07-30 Thu 08:12]
+     :POI-CATEGORY:         Plan
+     :POI-SUB-CATEGORY:     accepted
+     :PLAN-REVISIONS:       2
+     :PLAN-FIRST-SUBMITTED: [2026-07-30 Thu 08:03]
+     :PLAN-PREVIOUS-STATUS: rejected
+     :PLAN-FINISHED-AT:     [2026-07-30 Thu 08:47]   (stamped when the next plan started or end-of-session ran)
+     :CLAUDE-PLANNED:       [2026-07-30 Thu 08:12]
      :END:
 
      <plan body, pandoc'd markdown→org, headings demoted to level 5+>
@@ -276,9 +293,11 @@ if you want to test or script it. See `bin/`:
   — fire an interactive capture / navigation in Emacs; no stdin,
   session id as `$1`.
 - `ai-tracks-plan.sh` — takes PostToolUse-shape JSON for the
-  `ExitPlanMode` tool on stdin (`{session_id, tool_input: {plan,
-  planFilePath}, tool_response: {data: {planWasEdited, plan,
-  filePath}}}`) and calls `ai-tracks-plan-add`.
+  `ExitPlanMode` tool on stdin (`{session_id, tool_response:
+  {content: "...Your plan has been saved to: <path>..."}}`) and
+  calls `ai-tracks-plan-add`.  The plan itself is not in the
+  payload — Emacs reads it from disk at the path extracted from
+  `tool_response.content`.
 
 ## Troubleshooting
 

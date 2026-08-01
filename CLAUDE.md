@@ -86,7 +86,13 @@ Per-category timestamp drawer key (in addition to `:POI-CATEGORY:`):
 - Commit → `:CLAUDE-COMMIT:` plus `:COMMIT-SHA:`, `:COMMIT-AUTHOR:`
 - Summary → `:CLAUDE-SUMMARIZED:`
 - Plan → `:CLAUDE-PLANNED:` plus `:POI-SUB-CATEGORY:` (values: `accepted`,
-  `rejected`, `edited` — classified from the PostToolUse `tool_response`)
+  `rejected`, `edited` — classified from the PostToolUse `tool_response`);
+  `:PLAN-REVISIONS:` counter (bumped each time the update-in-place path
+  fires);  `:PLAN-FIRST-SUBMITTED:` (carried across revisions);
+  `:PLAN-PREVIOUS-STATUS:` (the prior fire's sub-category, present only
+  when revisions > 1 — tells a reader *why* the plan iterated);
+  `:PLAN-FINISHED-AT:` (stamped when a subsequent plan starts or
+  `/at:end-session` fires — see below)
 
 Invariants:
 
@@ -95,10 +101,17 @@ Invariants:
   they differ only in title prefix.
 - Explicit POI body is `#+begin_quote`(prompt) + Claude's last
   answer (pandoc'd) + user commentary.
-- Plan POIs update in place: on `ExitPlanMode`, if the bottommost
-  level-4 POI is already `POI-CATEGORY: Plan`, it is deleted first.
-  So reject → replan overwrites, while a Plan following non-Plan
-  POIs appends.
+- Plan POIs update in place ONLY when the trailing Plan POI's
+  `:POI-SUB-CATEGORY:` is `rejected` — i.e., the incoming
+  `ExitPlanMode` is treated as a revision of a rejected plan and
+  overwrites it (revision counter bumps, `:PLAN-FIRST-SUBMITTED:`
+  is carried, `:PLAN-PREVIOUS-STATUS:` records the prior status).
+  When the trailing Plan is `accepted` or `edited`, the incoming
+  fire is a new plan: append a fresh POI and stamp the prior with
+  `:PLAN-FINISHED-AT:`. Same stamp is applied by
+  `ai-tracks-end-session-add' to any outstanding Plan POI at
+  wrap-up time. Absence of `:PLAN-FINISHED-AT:` is the "still
+  in flight" signal.
 
 ## Entry points
 
@@ -118,17 +131,26 @@ need a fresh session to appear.
 | `/at:poi` | `ai-tracks-poi-add` | User-typed observation ("explicit POI" in module vocabulary). Emacs prompts for category and puts point in the org file. |
 | `/at:goto-track` | `ai-tracks-goto-track` | Jump Emacs to this session's Track via `org-roam-node-visit`. |
 
+`ai-tracks-poi-new` (interactive, no slash command) appends an empty
+POI to the enclosing Track from inside Emacs; workhorse is
+`ai-tracks-add-poi` (non-interactive, elisp-callable).
+
 ### Automatic triggers
 
 - **Claude Code PostToolUse hook on `ExitPlanMode`** — configured
   in `~/.claude/settings.json`. Runs `bin/ai-tracks-plan.sh` which
   hands the payload to `ai-tracks-plan-add`. Fires after the user
-  acts on the plan (approve, reject, or edit). The plan markdown
-  and the plan-file path are both injected into `tool_input` by
-  Claude Code's `normalizeToolInput` step, so the hook payload has
-  them without needing to read the plan file. Missing Track is
-  tolerated (`display-warning`, no POI written) — the hook fires in
-  every project regardless of whether ai-tracks is in use.
+  acts on the plan (approve, reject, or edit). Recovering the plan
+  content is not obvious: `tool_input` is `{}` (the LLM invokes
+  `ExitPlanMode` with no arguments), and `tool_response.content` is
+  a prose string like `"User has approved your plan. ... Your plan
+  has been saved to: <path>.md\n\n## Approved Plan:\n<plan>"`. We
+  regex the path out of the content string and read the plan from
+  disk (fallback: newest `.md` in `~/.claude/plans/`). Sub-category
+  (`accepted` | `rejected` | `edited`) is inferred from the same
+  content prose. Missing Track / no readable plan → `display-warning`
+  and skip; the hook fires in every project regardless of whether
+  ai-tracks is in use.
 - **Claude Code SessionStart hook** — configured in
   `~/.claude/settings.json`, matcher `startup|resume`. Runs
   `bin/ai-tracks-session-start.sh` which hands the payload to
