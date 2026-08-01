@@ -397,6 +397,10 @@ Same JSON schema as `ai-tracks-recap-add'."
          (marker (ai-tracks--track-marker session-id)))
     (ai-tracks--append-to-summary session-id (alist-get 'summary payload))
     (ai-tracks--mark-last-plan-poi-finished marker ts)
+    ;; `insert-recap-like' raises Emacs, but the two calls above run
+    ;; after that and may take a moment; raise again so the frame is
+    ;; foregrounded as the wrapper returns to the terminal.
+    (ai-tracks--raise-emacs)
     ts))
 
 ;;;; Point of Interest
