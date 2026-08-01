@@ -1,19 +1,22 @@
 # ai-tracks
 
-Records each Claude Code session as structured notes inside an
-existing org-roam node, so the conversation and the work it produced
-are captured next to the project they belong to.
+Records each Claude Code session as POIs under an org-roam node.
+Elisp does the work; bash wrappers are thin shims that hand JSON to
+Emacs.
 
-Everything is written by the Emacs side. Bash wrappers and slash
-commands are thin shims that hand JSON to Emacs; the elisp does the
-work.
+## Documentation policy
+
+After any change, evaluate whether `README.md` also needs updating.
+`README.md` covers installation, the org layout, and user-visible
+slash-command behavior; keep it in sync when those change.
 
 ## Vocabulary
 
 - **Track** — a level-3 heading under `** AI Tracks` inside an
   org-roam node. One Track per Claude Code session. Its `:ID:` is
   `claude-<uuid>` (the raw Claude session UUID prefixed with
-  `claude-`). Title: `Track <date>`.
+  `claude-`). Title: `Track [<date>]` — bracketed so org parses it
+  as an inactive timestamp (same for all dated POI titles).
 - **POI** (Point of Interest) — any level-4 heading under a Track.
   Every POI carries a `:POI-CATEGORY:` property naming its type.
 - **POI-CATEGORY values** — closed set:
@@ -27,8 +30,7 @@ work.
   | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `ai-tracks-poi-add` | `/at:poi` (user-authored — "explicit POI" in module vocabulary) |
   | `Summary` | `ai-tracks--append-to-summary` (invoked from `ai-tracks-end-session-add`) | Rolling per-Track summary — the first level-4 child of the Track; gets a new dated bullet group every `/at:end-session`. |
 
-  The five explicit values live in `ai-tracks-poi-categories`. Recap /
-  Resume / Commit / Summary are set by the code that creates the POI.
+  Explicit values live in `ai-tracks-poi-categories`.
 
 ## Resume recovery (missing End-of-session)
 
@@ -55,116 +57,38 @@ If the last POI *is* an End-of-session (the tidy case), the hook
 skips the notification and just appends the Resume POI directly —
 no Claude action required.
 
-## Recap boundary
-
-A "recap boundary" is the timestamp `ai-tracks-recap-since` returns as
-the point in time to summarise *from*. The boundary is the newest of:
-
-- the Track's `:CLAUDE-STARTED:` (initial),
-- any POI's `:CLAUDE-RECAPPED:` (Recap and End-of-session), or
-- any POI's `:CLAUDE-RESUMED:` (Resume).
-
-Both `/at:recap` and `/at:end-session` use this same boundary — an
-end-of-session recap summarises the same window an ordinary Recap
-would. Resume creates a boundary so the next `/at:recap` after a
-resume only summarises work done in the resumed leg.
-
 ## Layout inside an org-roam node
 
-```
-* <node title>                                (level 1, org-roam node — user picks at SessionStart)
-** AI Tracks                                  (level 2, plain; created on demand)
-*** Track 2026-07-30 Thu 06:53 <intention>    (level 3, one per session; :ID: claude-<uuid>)
-    :PROPERTIES:
-    :ID:            claude-<uuid>
-    :CLAUDE-CWD:    /path/session/was/started/in
-    :CLAUDE-SOURCE: startup | manual
-    :CLAUDE-STARTED: [2026-07-30 Thu 06:53]
-    :END:
-    <user's stated intention for this session>
-
-**** Recap 2026-07-30 Thu 07:23              (level 4 POI, category Recap)
-     :PROPERTIES:
-     :POI-CATEGORY:    Recap
-     :CLAUDE-RECAPPED: [2026-07-30 Thu 07:23]
-     :END:
-     - narrative summary bullet
-     - narrative summary bullet
-***** Files touched   (level 5 sections, all optional)
-      - path — one-liner
-***** Decisions
-      - ...
-***** Open threads
-      - ...
-***** Next
-      - ...
-
-**** POI 2026-07-30 Thu 07:34                (level 4, explicit POI)
-     :PROPERTIES:
-     :POI-CATEGORY: Observation
-     :CLAUDE-POI:   [2026-07-30 Thu 07:34]
-     :END:
-     <user-typed observation>
-
-**** Commit <short> — <subject>               (level 4, magit commit)
-     :PROPERTIES:
-     :POI-CATEGORY:   Commit
-     :CLAUDE-COMMIT:  [YYYY-MM-DD Day HH:MM]
-     :COMMIT-SHA:     <full-sha>
-     :COMMIT-AUTHOR:  <name>
-     :END:
-
-     [[https://github.com/OWNER/REPO/commit/<full-sha>]]     ← only if origin is github; blank line before it
-
-     <full commit body>
-
-     Files:
-     - path/a
-     - path/b
-
-**** End of session 2026-07-30 Thu 18:00      (level 4, still POI-CATEGORY: Recap)
-     :PROPERTIES:
-     :POI-CATEGORY:    Recap
-     :CLAUDE-RECAPPED: [2026-07-30 Thu 18:00]
-     :END:
-     - final summary bullet
-     - final summary bullet
-     (same level-5 sections as Recap)
-
-**** Resume 2026-07-30 Thu 09:15              (level 4, category Resume)
-     :PROPERTIES:
-     :POI-CATEGORY:   Resume
-     :CLAUDE-RESUMED: [2026-07-30 Thu 09:15]
-     :END:
-     <user-typed reflection on what to accomplish in this resumed leg>
-```
-
-The **Summary** node (POI-CATEGORY: Summary) is a rolling per-Track
-digest that lives as the *first* level-4 child of the Track — inserted
-by `ai-tracks--append-to-summary` on demand from
-`ai-tracks-end-session-add`.  Each `/at:end-session` appends the
-`summary` array from the payload as a new dated bullet group and
-updates `:CLAUDE-SUMMARIZED:` to the current timestamp:
+Skeleton (see README.md for a filled-out example):
 
 ```
-**** Summary
-     :PROPERTIES:
-     :POI-CATEGORY:      Summary
-     :CLAUDE-SUMMARIZED: [2026-07-31 Fri 09:15]   ← newest group's timestamp
-     :END:
-
-     [2026-07-30 Thu 09:04]:
-     - accomplished 1
-     - accomplished 2
-
-     [2026-07-31 Fri 09:15]:
-     - accomplished 3
-     - accomplished 4
+* <org-roam node>
+** AI Tracks                       (level 2, created on demand)
+*** Track [<date>] <intention>     (level 3, :ID: claude-<uuid>)
+**** <POI title>                   (level 4, :POI-CATEGORY: <cat>)
+***** <sub-section>                (level 5, Recap-shape only:
+                                    Files touched, Decisions,
+                                    Open threads, Next)
 ```
 
-Recaps and End-of-session share code (`ai-tracks--insert-recap-like`);
-they only differ in title prefix. Explicit POIs, Resumes, and Commits
-each have their own writer.
+Track drawer: `:ID:` (`claude-<uuid>`), `:CLAUDE-CWD:`,
+`:CLAUDE-SOURCE:` (`startup | manual`), `:CLAUDE-STARTED:`.
+
+Per-category timestamp drawer key (in addition to `:POI-CATEGORY:`):
+
+- Recap / End-of-session → `:CLAUDE-RECAPPED:`
+- Resume → `:CLAUDE-RESUMED:`
+- explicit POI → `:CLAUDE-POI:`
+- Commit → `:CLAUDE-COMMIT:` plus `:COMMIT-SHA:`, `:COMMIT-AUTHOR:`
+- Summary → `:CLAUDE-SUMMARIZED:`
+
+Invariants:
+
+- Summary is always the *first* level-4 child of a Track.
+- Recap and End-of-session share `ai-tracks--insert-recap-like`;
+  they differ only in title prefix.
+- Explicit POI body is `#+begin_quote`(prompt) + Claude's last
+  answer (pandoc'd) + user commentary.
 
 ## Entry points
 
@@ -238,6 +162,18 @@ need a fresh session to appear.
   `node+headline` target from `org-roam-gt-capture`. The
   session-start function turns the minor mode on if needed
   (`(unless org-roam-gt-mode (org-roam-gt-mode 1))`).
+- **`/at:poi` transcript injection**: the wrapper globs
+  `~/.claude/projects/*/<session-id>.jsonl` (session UUID is unique)
+  and passes a Unix-epoch cutoff so Emacs can prune newer entries —
+  they'd be Claude's own response to `/at:poi`, already flushed to
+  the transcript by the time Emacs reads it.  Extraction returns the
+  previous user prompt and Claude's last assistant text; both are
+  pandoc'd markdown→org, prompt in a `#+begin_quote`, answer as
+  body.  `queue-operation` enqueue entries count as genuine user
+  turns (mid-turn user submissions never become proper user messages).
+- **Raise Emacs**: user-facing entry points call
+  `ai-tracks--raise-emacs` before returning so the GUI frame comes
+  forward.  Keeps the bash wrappers minimal.
 
 ## Files
 
