@@ -166,7 +166,7 @@ POI to the enclosing Track from inside Emacs; workhorse is
     as `additionalContext`.  No Resume POI is added at this stage.
   - `resume` + missing Track → falls through to the capture UI
     (edge case: the first SessionStart capture was cancelled).
-- **`ai-tracks-magit-mode`** (global minor mode, off by default;
+- **`ai-tracks-magit-mode`** (global minor mode, on by default;
   lighter `AITrk`). When on, hooks
   `git-commit-post-finish-hook` (message-editing commits) and
   `magit-post-commit-hook` (`--no-edit` / `--amend --no-edit`). On

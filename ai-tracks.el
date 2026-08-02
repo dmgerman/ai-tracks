@@ -105,8 +105,8 @@ the SessionStart JSON payload; either may be nil."
              entry ,body
              :target (node+headline nil "AI Tracks")
              :empty-lines 1))))
-    (org-roam-capture-)
-    (ai-tracks--raise-emacs)))
+    (ai-tracks--raise-emacs)
+    (org-roam-capture-)))
 
 ;;;###autoload
 (defun ai-tracks-resume-add (session-id)
@@ -413,7 +413,7 @@ Claude Code PostToolUse hook on `ExitPlanMode') and is not offered
 in the interactive picker in practice, but it is listed here so the
 value is part of the closed set.")
 
-(defun ai-tracks--jsonl-genuine-user-p (obj)g
+(defun ai-tracks--jsonl-genuine-user-p (obj)
   "Return non-nil if OBJ is a genuine user turn (not a tool_result carrier).
 OBJ is a parsed JSONL entry as an alist.  Recognises two shapes:
 
@@ -954,6 +954,7 @@ fires PostToolUse unconditionally."
             (outline-show-branches)))
         (when (cdr conv)
           (message "ai-tracks: %s" (cdr conv)))
+        (ai-tracks--raise-emacs)
         ts)))))
 
 ;;;; Empty POI (user-invoked from Emacs, not via a slash command)
@@ -1198,7 +1199,9 @@ When enabled, each magit commit — via the commit message buffer or a
 `--no-edit' style command — prompts in Emacs for a Track (found via
 the org-roam DB, filtered by :CLAUDE-CWD:) and inserts a level-4
 Commit heading under the chosen Track.  Commits made from the shell
-outside Emacs are not affected."
+outside Emacs are not affected.
+
+On by default: enabled when the module is loaded."
   :global t
   :lighter " AITrk"
   (if ai-tracks-magit-mode
@@ -1207,6 +1210,8 @@ outside Emacs are not affected."
         (add-hook 'magit-post-commit-hook      #'ai-tracks-after-commit))
     (remove-hook 'git-commit-post-finish-hook  #'ai-tracks-after-commit)
     (remove-hook 'magit-post-commit-hook       #'ai-tracks-after-commit)))
+
+(ai-tracks-magit-mode 1)
 
 (provide 'ai-tracks)
 
