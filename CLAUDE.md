@@ -128,7 +128,7 @@ need a fresh session to appear.
 | `/at:recap` | `ai-tracks-recap-add` | Mid-session recap. Claude gathers boundary + writes the summary JSON. |
 | `/at:end-session` | `ai-tracks-end-session-add` | Final wrap-up right before the session ends. Same shape as recap. |
 | `/at:resume` | `ai-tracks-resume-add` | Append a Resume POI. Normally auto-fired by the SessionStart hook on `source: resume`; only invoked manually by Claude during the missing-end-of-session recovery flow (see below). |
-| `/at:poi` | `ai-tracks-poi-add` | User-typed observation ("explicit POI" in module vocabulary). Emacs prompts for category and puts point in the org file. |
+| `/at:poi [N]` | `ai-tracks-poi-add` | User-typed observation ("explicit POI" in module vocabulary). Emacs prompts for category and puts point in the org file. Optional positional integer N (default 1) picks which prior exchange to embed: N=1 is the most recent, N=2 skips it and uses the one before, and so on. |
 | `/at:goto-track` | `ai-tracks-goto-track` | Jump Emacs to this session's Track via `org-roam-node-visit`. |
 
 `ai-tracks-poi-new` (interactive, no slash command) appends an empty
@@ -183,10 +183,10 @@ POI to the enclosing Track from inside Emacs; workhorse is
   that may contain quotes, backslashes, or newlines (`cwd`, commit
   body).
 - **Blocking**: `--no-wait` for calls whose only success signal is
-  the user seeing something in Emacs (SessionStart, `/at:poi`,
-  `/at:track-start`). Blocking `emacsclient` for calls that need to
-  surface success/failure back to Claude (`/at:recap`, `/at:end-session`,
-  boundary lookup).
+  the user seeing something in Emacs (SessionStart, `/at:poi`'s main
+  insertion, `/at:track-start`). Blocking `emacsclient` for calls
+  that need to surface success/failure back to Claude (`/at:recap`,
+  `/at:end-session`, boundary lookup, `/at:poi`'s round pre-check).
 - **Boundary lookup for recap-like entries**: `ai-tracks-recap-since`
   scans the Track subtree and returns the newest of `:CLAUDE-STARTED:`,
   `:CLAUDE-RECAPPED:`, or `:CLAUDE-RESUMED:`. `/at:end-session` reuses
@@ -211,11 +211,19 @@ POI to the enclosing Track from inside Emacs; workhorse is
   `~/.claude/projects/*/<session-id>.jsonl` (session UUID is unique)
   and passes a Unix-epoch cutoff so Emacs can prune newer entries —
   they'd be Claude's own response to `/at:poi`, already flushed to
-  the transcript by the time Emacs reads it.  Extraction returns the
-  previous user prompt and Claude's last assistant text; both are
-  pandoc'd markdown→org, prompt in a `#+begin_quote`, answer as
-  body.  `queue-operation` enqueue entries count as genuine user
-  turns (mid-turn user submissions never become proper user messages).
+  the transcript by the time Emacs reads it.  Extraction returns a
+  user prompt and Claude's answer; both are pandoc'd markdown→org
+  (with `--shift-heading-level-by=4` so any `#` headings nest under
+  the level-4 POI), prompt in a `#+begin_quote`, answer as body.
+  `queue-operation` enqueue entries count as genuine user turns
+  (mid-turn user submissions never become proper user messages).
+  A 1-based `round` selector (`/at:poi N`) picks which prior
+  exchange to embed: N=1 (default) is the newest, N=2 skips the
+  newest and uses the one before, etc.  The wrapper's blocking
+  `ai-tracks--poi-round-status` pre-check rejects out-of-range N
+  via non-zero exit + stderr (Claude reports); invalid syntax
+  (non-integer, ≤0) also exits non-zero and additionally fires
+  `(message ...)` in Emacs.
 - **Raise Emacs**: user-facing entry points call
   `ai-tracks--raise-emacs` before returning so the GUI frame comes
   forward.  Keeps the bash wrappers minimal.

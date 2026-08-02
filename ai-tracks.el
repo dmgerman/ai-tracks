@@ -514,8 +514,11 @@ unreadable."
           (forward-line 1)))
       objs)))
 
-(defun ai-tracks--last-exchange (transcript-path &optional cutoff-epoch)
-  "Return a plist describing the last user-prompt / assistant-answer exchange.
+(defun ai-tracks--nth-exchange (transcript-path n &optional cutoff-epoch)
+  "Return a plist describing the Nth-most-recent user-prompt / assistant-answer exchange.
+N is 1-based: N=1 is the newest exchange (the one just before the
+slash-command trigger), N=2 is the exchange before that, and so on.
+
 Reads TRANSCRIPT-PATH (a JSONL file).  When CUTOFF-EPOCH is non-nil,
 entries with `timestamp' strictly greater than CUTOFF-EPOCH are
 ignored — this prunes anything Claude wrote in response to the
@@ -524,12 +527,13 @@ Emacs gets a chance to read it).
 
 The plist has:
   :user       string — text of the genuine user message that triggered
-                       Claude's answer (the one before the slash-command
-                       trigger), or nil if not found.
+                       Claude's answer for this round, or nil if not
+                       found.
   :assistant  string — concatenated `text' blocks from all assistant
-                       messages between the slash-command trigger (if
-                       present) and the previous genuine user message.
-Returns nil when no assistant text can be extracted."
+                       messages between the following genuine user
+                       turn and this round's user prompt.
+
+Returns nil when fewer than N complete exchanges are available."
   (let* ((all-objs (ai-tracks--read-jsonl transcript-path))
          (objs (if cutoff-epoch
                    (seq-filter
@@ -538,26 +542,55 @@ Returns nil when no assistant text can be extracted."
                         (or (null e) (<= e cutoff-epoch))))
                     all-objs)
                  all-objs))
-         (done nil)
-         (prev-user nil)
-         texts)
-    ;; Walk newest→oldest.  Skip everything (including any consecutive
-    ;; genuine user turns — slash commands leave two: a command-name
-    ;; marker plus a text-body entry) until we start collecting
-    ;; assistant text.  Once we have text, the next genuine user turn
-    ;; is the actual prior prompt.
-    (dolist (obj objs)
-      (unless done
+         (rounds-collected 0)
+         texts
+         result)
+    ;; Walk newest→oldest.  For each round we accumulate assistant
+    ;; text blocks until a genuine user turn closes the round; that
+    ;; user turn is the round's prompt.  If it is the Nth round we
+    ;; capture the plist and stop; otherwise we reset the assistant
+    ;; accumulator and continue looking for an older round.
+    ;;
+    ;; Note the `(and texts ...)' guard: consecutive user turns at
+    ;; the head of the transcript (slash-command marker + text body)
+    ;; are skipped until we have real assistant text to close.
+    (catch 'done
+      (dolist (obj objs)
         (cond
          ((and texts (ai-tracks--jsonl-genuine-user-p obj))
-          (setq prev-user (ai-tracks--jsonl-user-text obj))
-          (setq done t))
+          (setq rounds-collected (1+ rounds-collected))
+          (when (= rounds-collected n)
+            (setq result
+                  (list :user      (ai-tracks--jsonl-user-text obj)
+                        :assistant (mapconcat #'identity
+                                              (nreverse texts)
+                                              "\n\n")))
+            (throw 'done nil))
+          (setq texts nil))
          (t
           (when-let ((txt (ai-tracks--jsonl-assistant-text obj)))
             (push txt texts))))))
-    (when texts
-      (list :user      prev-user
-            :assistant (mapconcat #'identity texts "\n\n")))))
+    result))
+
+(defun ai-tracks--poi-round-status (transcript-path cutoff-epoch n)
+  "Return \"ok\" if round N of TRANSCRIPT-PATH is retrievable, else an error string.
+Used by the /at:poi wrapper as a blocking pre-check so range errors
+surface to Claude via the wrapper's exit code and stderr, rather than
+silently producing an empty POI.
+
+`ok' means: TRANSCRIPT-PATH is a readable file and at least N complete
+(user prompt + assistant answer) exchanges are available older than
+CUTOFF-EPOCH.  Any other outcome returns a short human-readable
+diagnostic string."
+  (cond
+   ((not (and (integerp n) (> n 0)))
+    (format "round must be a positive integer, got %S" n))
+   ((not (and transcript-path (file-readable-p transcript-path)))
+    (format "transcript unreadable: %s" (or transcript-path "<none>")))
+   ((not (ai-tracks--nth-exchange transcript-path n cutoff-epoch))
+    (format "requested round %d not available (fewer than %d complete exchanges)"
+            n n))
+   (t "ok")))
 
 (defun ai-tracks--markdown-to-org (markdown &optional heading-shift)
   "Convert MARKDOWN string to org via pandoc.
@@ -589,22 +622,29 @@ describing what went wrong (missing pandoc or non-zero exit)."
          (t
           (cons markdown (format "pandoc %s; inserted raw markdown" exit))))))))
 
-(defun ai-tracks-poi-add (session-id &optional transcript-path cutoff-epoch)
+(defun ai-tracks-poi-add (session-id &optional transcript-path cutoff-epoch round)
   "Insert a level-4 explicit-POI heading under the Track for SESSION-ID.
 Prompts for a category from `ai-tracks-poi-categories', writes the
 drawer, and switches to the org file's buffer.
 
 When TRANSCRIPT-PATH is a readable JSONL file (this session's Claude
-Code transcript), extracts the previous user prompt and Claude's last
-answer via `ai-tracks--last-exchange', converts each markdown→org via
-pandoc, and inserts them as the POI body: the user prompt inside a
-`#+begin_quote' block, followed by Claude's answer.  Point lands on a
-blank line below so the user can add their own commentary.
+Code transcript), extracts a user prompt and Claude's answer via
+`ai-tracks--nth-exchange', converts each markdown→org via pandoc, and
+inserts them as the POI body: the user prompt inside a `#+begin_quote'
+block, followed by Claude's answer.  Point lands on a blank line
+below so the user can add their own commentary.
 
 CUTOFF-EPOCH is a Unix timestamp (seconds); JSONL entries newer than
 this are ignored during extraction.  The wrapper passes its own
 invocation time so Claude's response to the /at:poi trigger itself is
-not pulled into the POI."
+not pulled into the POI.
+
+ROUND is 1-based (default 1) and selects which prior exchange to
+embed.  ROUND=1 is the newest (the exchange that just preceded the
+/at:poi trigger); ROUND=2 skips that and uses the exchange before
+it; and so on.  The wrapper is expected to pre-validate that ROUND
+exchanges are available; if it isn't, the POI is still created but
+with no embedded body."
   (let* ((marker (ai-tracks--track-marker session-id))
          (category (completing-read
                     "POI category: "
@@ -613,8 +653,9 @@ not pulled into the POI."
          (now (current-time))
          (title (format-time-string "POI [%Y-%m-%d %a %H:%M]" now))
          (ts (format-time-string "[%Y-%m-%d %a %H:%M]" now))
+         (n (or round 1))
          (exchange (and transcript-path
-                        (ai-tracks--last-exchange transcript-path cutoff-epoch)))
+                        (ai-tracks--nth-exchange transcript-path n cutoff-epoch)))
          (user-md      (plist-get exchange :user))
          (assistant-md (plist-get exchange :assistant))
          (user-conv      (and user-md      (ai-tracks--markdown-to-org user-md 4)))
