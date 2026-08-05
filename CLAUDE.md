@@ -28,7 +28,7 @@ slash-command behavior; keep it in sync when those change.
   | `Resume` | `ai-tracks--session-resume-add` | SessionStart hook with `source: resume` |
   | `Commit` | `ai-tracks--insert-commit` | `ai-tracks-magit-mode` fires on any magit commit |
   | `Plan` | `ai-tracks-plan-add` | Claude Code PostToolUse hook fires on every `ExitPlanMode` (approved, rejected, or edited) |
-  | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `ai-tracks-poi-add` | `/at:poi` (user-authored — "explicit POI" in module vocabulary) |
+  | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `ai-tracks-poi-new` | `/at:poi` or `M-x ai-tracks-poi-new` (user-authored — "explicit POI" in module vocabulary) |
   | `Summary` | `ai-tracks--append-to-summary` (invoked from `ai-tracks-end-session-add`) | Rolling per-Track summary — the first level-4 child of the Track; gets a new dated bullet group every `/at:end-session`. |
 
   Explicit values live in `ai-tracks-poi-categories`.
@@ -128,12 +128,17 @@ need a fresh session to appear.
 | `/at:recap` | `ai-tracks-recap-add` | Mid-session recap. Claude gathers boundary + writes the summary JSON. |
 | `/at:end-session` | `ai-tracks-end-session-add` | Final wrap-up right before the session ends. Same shape as recap. |
 | `/at:resume` | `ai-tracks-resume-add` | Append a Resume POI. Normally auto-fired by the SessionStart hook on `source: resume`; only invoked manually by Claude during the missing-end-of-session recovery flow (see below). |
-| `/at:poi [N]` | `ai-tracks-poi-add` | User-typed observation ("explicit POI" in module vocabulary). Emacs prompts for category and puts point in the org file. Optional positional integer N (default 1) picks which prior exchange to embed: N=1 is the most recent, N=2 skips it and uses the one before, and so on. |
+| `/at:poi [N]` | `ai-tracks-poi-new` | User-typed observation ("explicit POI" in module vocabulary). Emacs prompts for category and puts point in the org file. Optional positional integer N (0-based, default 0) picks which prior exchange to embed: N=0 is the most recent, N=1 skips it and uses the one before, and so on. |
 | `/at:goto-track` | `ai-tracks-goto-track` | Jump Emacs to this session's Track via `org-roam-node-visit`. |
 
-`ai-tracks-poi-new` (interactive, no slash command) appends an empty
-POI to the enclosing Track from inside Emacs; workhorse is
-`ai-tracks-add-poi` (non-interactive, elisp-callable).
+`ai-tracks-poi-new` is a single function that serves both the
+`/at:poi` bash wrapper and `M-x ai-tracks-poi-new` interactive
+invocation.  Signature:
+`(&optional round category session-id transcript-path cutoff-epoch)`.
+The wrapper passes all five; the interactive path leaves the last
+three nil (Track is located from point, transcript is globbed).
+`round` and `category` are prompted for (`read-number` /
+`completing-read`) when nil.
 
 ### Automatic triggers
 
@@ -217,13 +222,15 @@ POI to the enclosing Track from inside Emacs; workhorse is
   the level-4 POI), prompt in a `#+begin_quote`, answer as body.
   `queue-operation` enqueue entries count as genuine user turns
   (mid-turn user submissions never become proper user messages).
-  A 1-based `round` selector (`/at:poi N`) picks which prior
-  exchange to embed: N=1 (default) is the newest, N=2 skips the
+  A 0-based `round` selector (`/at:poi N`) picks which prior
+  exchange to embed: N=0 (default) is the newest, N=1 skips the
   newest and uses the one before, etc.  The wrapper's blocking
   `ai-tracks--poi-round-status` pre-check rejects out-of-range N
   via non-zero exit + stderr (Claude reports); invalid syntax
-  (non-integer, ≤0) also exits non-zero and additionally fires
-  `(message ...)` in Emacs.
+  (non-integer, negative) also exits non-zero and additionally fires
+  `(message ...)` in Emacs.  `M-x ai-tracks-poi-new` (the same
+  function invoked interactively) prompts for the round via
+  `read-number' (default 0) before prompting for category.
 - **Raise Emacs**: user-facing entry points call
   `ai-tracks--raise-emacs` before returning so the GUI frame comes
   forward.  Keeps the bash wrappers minimal.

@@ -407,7 +407,7 @@ Same JSON schema as `ai-tracks-recap-add'."
 
 (defvar ai-tracks-poi-categories
   '("Surprise" "Event" "Decision" "Observation" "Other" "Claude-behaviour" "Plan")
-  "Categories offered when creating a POI via `ai-tracks-poi-add'.
+  "Categories offered when creating a POI via `ai-tracks-poi-new'.
 `Plan' is inserted automatically by `ai-tracks-plan-add' (see the
 Claude Code PostToolUse hook on `ExitPlanMode') and is not offered
 in the interactive picker in practice, but it is listed here so the
@@ -516,8 +516,9 @@ unreadable."
 
 (defun ai-tracks--nth-exchange (transcript-path n &optional cutoff-epoch)
   "Return a plist describing the Nth-most-recent user-prompt / assistant-answer exchange.
-N is 1-based: N=1 is the newest exchange (the one just before the
-slash-command trigger), N=2 is the exchange before that, and so on.
+N is 0-based: N=0 is the newest exchange (the one just before the
+slash-command trigger), N=1 skips the newest and returns the one
+before it, and so on.
 
 Reads TRANSCRIPT-PATH (a JSONL file).  When CUTOFF-EPOCH is non-nil,
 entries with `timestamp' strictly greater than CUTOFF-EPOCH are
@@ -533,7 +534,7 @@ The plist has:
                        messages between the following genuine user
                        turn and this round's user prompt.
 
-Returns nil when fewer than N complete exchanges are available."
+Returns nil when fewer than N+1 complete exchanges are available."
   (let* ((all-objs (ai-tracks--read-jsonl transcript-path))
          (objs (if cutoff-epoch
                    (seq-filter
@@ -558,7 +559,6 @@ Returns nil when fewer than N complete exchanges are available."
       (dolist (obj objs)
         (cond
          ((and texts (ai-tracks--jsonl-genuine-user-p obj))
-          (setq rounds-collected (1+ rounds-collected))
           (when (= rounds-collected n)
             (setq result
                   (list :user      (ai-tracks--jsonl-user-text obj)
@@ -566,6 +566,7 @@ Returns nil when fewer than N complete exchanges are available."
                                               (nreverse texts)
                                               "\n\n")))
             (throw 'done nil))
+          (setq rounds-collected (1+ rounds-collected))
           (setq texts nil))
          (t
           (when-let ((txt (ai-tracks--jsonl-assistant-text obj)))
@@ -578,18 +579,19 @@ Used by the /at:poi wrapper as a blocking pre-check so range errors
 surface to Claude via the wrapper's exit code and stderr, rather than
 silently producing an empty POI.
 
-`ok' means: TRANSCRIPT-PATH is a readable file and at least N complete
+N is 0-based (N=0 is the newest exchange).  `ok' means:
+TRANSCRIPT-PATH is a readable file and at least N+1 complete
 (user prompt + assistant answer) exchanges are available older than
 CUTOFF-EPOCH.  Any other outcome returns a short human-readable
 diagnostic string."
   (cond
-   ((not (and (integerp n) (> n 0)))
-    (format "round must be a positive integer, got %S" n))
+   ((not (and (integerp n) (>= n 0)))
+    (format "round must be a non-negative integer, got %S" n))
    ((not (and transcript-path (file-readable-p transcript-path)))
     (format "transcript unreadable: %s" (or transcript-path "<none>")))
    ((not (ai-tracks--nth-exchange transcript-path n cutoff-epoch))
     (format "requested round %d not available (fewer than %d complete exchanges)"
-            n n))
+            n (1+ n)))
    (t "ok")))
 
 (defun ai-tracks--markdown-to-org (markdown &optional heading-shift)
@@ -622,67 +624,32 @@ describing what went wrong (missing pandoc or non-zero exit)."
          (t
           (cons markdown (format "pandoc %s; inserted raw markdown" exit))))))))
 
-(defun ai-tracks-poi-add (session-id &optional transcript-path cutoff-epoch round)
-  "Insert a level-4 explicit-POI heading under the Track for SESSION-ID.
-Prompts for a category from `ai-tracks-poi-categories', writes the
-drawer, and switches to the org file's buffer.
+(defun ai-tracks--insert-poi-body (exchange)
+  "Insert converted EXCHANGE text at point; return a list of pandoc warnings.
+EXCHANGE is a plist from `ai-tracks--nth-exchange' with :user and
+:assistant keys (either may be nil).  The user prompt is inserted
+inside a `#+begin_quote' block; the assistant answer follows as
+plain body.  Both are converted markdown→org via
+`ai-tracks--markdown-to-org' with heading-shift 4 so any `#'
+headings nest under the level-4 POI heading.
 
-When TRANSCRIPT-PATH is a readable JSONL file (this session's Claude
-Code transcript), extracts a user prompt and Claude's answer via
-`ai-tracks--nth-exchange', converts each markdown→org via pandoc, and
-inserts them as the POI body: the user prompt inside a `#+begin_quote'
-block, followed by Claude's answer.  Point lands on a blank line
-below so the user can add their own commentary.
-
-CUTOFF-EPOCH is a Unix timestamp (seconds); JSONL entries newer than
-this are ignored during extraction.  The wrapper passes its own
-invocation time so Claude's response to the /at:poi trigger itself is
-not pulled into the POI.
-
-ROUND is 1-based (default 1) and selects which prior exchange to
-embed.  ROUND=1 is the newest (the exchange that just preceded the
-/at:poi trigger); ROUND=2 skips that and uses the exchange before
-it; and so on.  The wrapper is expected to pre-validate that ROUND
-exchanges are available; if it isn't, the POI is still created but
-with no embedded body."
-  (let* ((marker (ai-tracks--track-marker session-id))
-         (category (completing-read
-                    "POI category: "
-                    ai-tracks-poi-categories
-                    nil t))
-         (now (current-time))
-         (title (format-time-string "POI [%Y-%m-%d %a %H:%M]" now))
-         (ts (format-time-string "[%Y-%m-%d %a %H:%M]" now))
-         (n (or round 1))
-         (exchange (and transcript-path
-                        (ai-tracks--nth-exchange transcript-path n cutoff-epoch)))
-         (user-md      (plist-get exchange :user))
+Returns the warnings in insertion order; caller decides how to
+surface them."
+  (let* ((user-md      (plist-get exchange :user))
          (assistant-md (plist-get exchange :assistant))
          (user-conv      (and user-md      (ai-tracks--markdown-to-org user-md 4)))
          (assistant-conv (and assistant-md (ai-tracks--markdown-to-org assistant-md 4)))
          warnings)
-    (switch-to-buffer (marker-buffer marker))
-    (goto-char (marker-position marker))
-    (goto-char (save-excursion (org-end-of-subtree t t)))
-    (unless (bolp) (insert "\n"))
-    (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: %s\n:CLAUDE-POI: %s\n:END:\n"
-                    title category ts))
     (when user-conv
-      (insert "#+begin_quote\n")
-      (let ((body (string-trim-right (car user-conv))))
-        (insert body "\n"))
-      (insert "#+end_quote\n\n")
+      (insert "#+begin_quote\n"
+              (string-trim-right (car user-conv)) "\n"
+              "#+end_quote\n\n")
       (when (cdr user-conv) (push (cdr user-conv) warnings)))
     (when assistant-conv
-      (let ((body (string-trim-right (car assistant-conv))))
-        (insert body "\n\n"))
+      (insert (string-trim-right (car assistant-conv)) "\n\n")
       (when (cdr assistant-conv) (push (cdr assistant-conv) warnings)))
-    (org-reveal)
-    (save-buffer)
-    (when warnings
-      (message "ai-tracks: %s" (mapconcat #'identity (nreverse warnings) "; ")))
-    (ai-tracks--raise-emacs)
-    ts))
+    (nreverse warnings)))
+
 
 ;;;; Plan (Claude Code ExitPlanMode PostToolUse hook)
 
@@ -1014,55 +981,85 @@ means point is not inside an ai-tracks Track."
                    (and id (string-prefix-p "claude-" id))))
         (point-marker)))))
 
-(defun ai-tracks-add-poi (track-marker category)
-  "Insert an empty level-4 POI under the Track at TRACK-MARKER with CATEGORY.
-Non-interactive workhorse for `ai-tracks-poi-new'; also callable
-from other elisp when the Track marker and category are already
-known.
-
-Appends the POI at the end of the Track subtree with title
-`POI [<date>]', a properties drawer carrying `:POI-CATEGORY:'
-CATEGORY and `:CLAUDE-POI:' <timestamp>, and no body.  Saves the
-buffer.
-
-Returns a marker at the end of the POI's title line (positioned at
-the trailing newline, i.e. immediately after the closing `]' of the
-timestamp) so callers can `goto-char' it to land point on the title
-for further editing."
-  (let* ((now (current-time))
-         (title (format-time-string "POI [%Y-%m-%d %a %H:%M]" now))
-         (ts    (format-time-string "[%Y-%m-%d %a %H:%M]" now))
-         end-of-title)
-    (org-with-point-at track-marker
-      (goto-char (save-excursion (org-end-of-subtree t t)))
-      (unless (bolp) (insert "\n"))
-      (insert (format "**** %s" title))
-      (setq end-of-title (point-marker))
-      (insert (format "\n:PROPERTIES:\n:POI-CATEGORY: %s\n:CLAUDE-POI: %s\n:END:\n"
-                      category ts))
-      (save-buffer))
-    end-of-title))
-
 ;;;###autoload
-(defun ai-tracks-poi-new (category)
-  "Append an empty POI under the enclosing Track and drop point on its title.
-Prompts for CATEGORY from `ai-tracks-poi-categories'.  Signals a
-`user-error' if point is not inside an ai-tracks Track (i.e. not
-inside a level-3 heading whose `:ID:' starts with `claude-').
+(defun ai-tracks-poi-new (&optional round category session-id transcript-path cutoff-epoch)
+  "Append an explicit POI under a Track and embed the ROUND-th prior exchange.
+Single implementation for both the in-Emacs `M-x ai-tracks-poi-new'
+path and the `/at:poi' bash wrapper.
 
-After insertion, point lands on the title line right after the
-`]' of the timestamp, so typing continues the title inline.  Use
-this when you want to jot a POI while editing the Track buffer
-directly, without going through Claude and `/at:poi'."
+ROUND is 0-based: 0 selects the newest exchange, 1 skips the newest
+and selects the one before it, and so on.  CATEGORY is one of
+`ai-tracks-poi-categories'.  Both are `&optional' — nil prompts.
+Interactively, ROUND is read via `read-number' (default 0) and then
+CATEGORY via `completing-read'.
+
+Track lookup:
+- When SESSION-ID is non-nil (typically from the bash wrapper), the
+  Track is looked up by ID via `ai-tracks--track-marker'.
+- When SESSION-ID is nil (interactive path), the enclosing Track is
+  located from point; SESSION-ID is then derived from its `:ID:'
+  (stripping the `claude-' prefix).
+
+When TRANSCRIPT-PATH is nil, globs
+`~/.claude/projects/*/<session-id>.jsonl'.  CUTOFF-EPOCH is a Unix
+timestamp; JSONL entries newer than it are ignored (the wrapper
+passes its own invocation time so Claude's response to /at:poi is
+not pulled in).  Interactive callers leave it nil.
+
+The user prompt and Claude's answer are extracted via
+`ai-tracks--nth-exchange', converted markdown→org via pandoc, and
+inserted as the POI body: the prompt inside a `#+begin_quote'
+block, followed by the answer.  Point lands on a blank line below
+so the user can add their own commentary.
+
+Signals `user-error' — inserting nothing — when the Track cannot
+be located, no transcript file exists for the session, or ROUND is
+out of range.  Returns the POI's timestamp string on success."
   (interactive
-   (list (completing-read "POI category: "
+   (list (read-number "POI round (0 = newest): " 0)
+         (completing-read "POI category: "
                           ai-tracks-poi-categories nil t)))
-  (let ((track-marker (ai-tracks--enclosing-track-marker)))
-    (unless track-marker
-      (user-error "ai-tracks: point is not inside an ai-tracks Track"))
-    (let ((end-of-title (ai-tracks-add-poi track-marker category)))
-      (goto-char end-of-title)
-      (ai-tracks--raise-emacs))))
+  (let* ((round (or round (read-number "POI round (0 = newest): " 0)))
+         (category (or category
+                       (completing-read "POI category: "
+                                        ai-tracks-poi-categories nil t)))
+         (track-marker (if session-id
+                           (ai-tracks--track-marker session-id)
+                         (or (ai-tracks--enclosing-track-marker)
+                             (user-error
+                              "ai-tracks: point is not inside an ai-tracks Track")))))
+    (let* ((session-id
+            (or session-id
+                (let ((tid (org-with-point-at track-marker
+                             (org-entry-get (point) "ID"))))
+                  (substring tid (length "claude-")))))
+           (transcript-path
+            (or transcript-path
+                (car (file-expand-wildcards
+                      (expand-file-name
+                       (format "~/.claude/projects/*/%s.jsonl" session-id)))))))
+      (unless (and transcript-path (file-readable-p transcript-path))
+        (user-error "ai-tracks: no transcript found for session %s" session-id))
+      (let ((status (ai-tracks--poi-round-status transcript-path cutoff-epoch round)))
+        (unless (equal status "ok")
+          (user-error "ai-tracks: %s" status)))
+      (let* ((exchange (ai-tracks--nth-exchange transcript-path round cutoff-epoch))
+             (now (current-time))
+             (title (format-time-string "POI [%Y-%m-%d %a %H:%M]" now))
+             (ts (format-time-string "[%Y-%m-%d %a %H:%M]" now)))
+        (switch-to-buffer (marker-buffer track-marker))
+        (goto-char (marker-position track-marker))
+        (goto-char (save-excursion (org-end-of-subtree t t)))
+        (unless (bolp) (insert "\n"))
+        (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: %s\n:CLAUDE-POI: %s\n:END:\n"
+                        title category ts))
+        (let ((warnings (ai-tracks--insert-poi-body exchange)))
+          (org-reveal)
+          (save-buffer)
+          (when warnings
+            (message "ai-tracks: %s" (mapconcat #'identity warnings "; "))))
+        (ai-tracks--raise-emacs)
+        ts))))
 
 ;;;; Navigation
 

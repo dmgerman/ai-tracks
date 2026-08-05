@@ -30,7 +30,6 @@ Clone the module into `~/.emacs.d/modules/ai-tracks/` and load it with
   :commands (ai-tracks-session-start
              ai-tracks-recap-since
              ai-tracks-recap-add
-             ai-tracks-poi-add
              ai-tracks-poi-new
              ai-tracks-resume-add
              ai-tracks-magit-mode))
@@ -159,7 +158,7 @@ Categories:
 | `/at:track-start` | Manually create a Track for the current session (if the SessionStart hook didn't fire or you cancelled it). |
 | `/at:recap` | Ask Claude to summarise work since the last boundary and append a Recap POI. |
 | `/at:end-session` | Final wrap-up: appends an `End of session …` POI and grows the rolling Summary node. Run this before you close Claude. |
-| `/at:poi` | Opens an interactive POI capture in Emacs — pick a category. The previous user prompt and Claude's last answer are pulled verbatim from the session's JSONL transcript, converted markdown→org via pandoc, and inserted as the POI body; point lands on a blank line below for your own commentary. Requires `pandoc` on `PATH` for the conversion (raw markdown is inserted with a minibuffer warning if pandoc is missing). |
+| `/at:poi [N]` | Opens an interactive POI capture in Emacs — pick a category. The previous user prompt and Claude's last answer are pulled verbatim from the session's JSONL transcript, converted markdown→org via pandoc, and inserted as the POI body; point lands on a blank line below for your own commentary. Optional 0-based `N` picks a farther-back exchange (default 0 = most recent, 1 = the one before, and so on). Requires `pandoc` on `PATH` for the conversion (raw markdown is inserted with a minibuffer warning if pandoc is missing). |
 | `/at:resume` | Append a Resume POI. Normally auto-fired on resume; only invoked manually during the missing-end-of-session recovery flow. |
 | `/at:goto-track` | Jump Emacs to this session's Track (uses org-roam node navigation). |
 
@@ -169,15 +168,20 @@ Emacs comes forward to show you the resulting POI or capture prompt.
 
 ## Adding a POI directly from Emacs
 
-`M-x ai-tracks-poi-new` — invoked from inside a Track subtree,
-prompts for a category from the closed set, and appends an empty
-`**** POI [<date>]` heading at the end of the Track with the drawer
-filled in.  Point lands on the title line right after the `]` so
-you can extend the title inline before typing the body.  Signals a
-`user-error` when point is outside a Track.
+`M-x ai-tracks-poi-new` invokes the same function `/at:poi` does,
+just without going through Claude.  Emacs prompts for the round
+first (`read-number`, default 0 = newest exchange, `RET` accepts)
+and then for the category, then appends a level-4 POI to the
+enclosing Track with the selected exchange as its body (user
+prompt in a `#+begin_quote`, Claude's answer following it, both
+pandoc-converted markdown→org).  Point lands on a blank line
+below so you can add your own commentary.
 
-Use when you want to record a POI while editing the org file
-directly, without going through Claude and `/at:poi`.
+Must be invoked from inside a Track subtree so the session UUID
+can be derived from the enclosing Track's `:ID:`.  Signals a
+`user-error` — inserting nothing — when point is not inside a
+Track, no transcript file exists for this session, or the round
+is out of range.
 
 ## Typical workflow
 

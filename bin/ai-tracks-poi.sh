@@ -18,8 +18,8 @@
 # Usage:  ai-tracks-poi.sh [<session-id> [<transcript-path> [<round>]]]
 # Falls back to $CLAUDE_CODE_SESSION_ID if no session-id given.  If
 # no transcript-path given, globs ~/.claude/projects/*/<session-id>.jsonl
-# (the session UUID is unique across projects).  Round defaults to 1
-# (the most recent exchange).
+# (the session UUID is unique across projects).  Round is 0-based and
+# defaults to 0 (the most recent exchange).
 
 set -u
 
@@ -52,20 +52,21 @@ else
     tp_elisp="nil"
 fi
 
-# Round arg: empty -> 1.  Non-numeric or <=0 -> fire an Emacs
-# message and exit 1 so Claude sees the rejection.
+# Round arg: empty -> 0.  Non-numeric -> fire an Emacs message and
+# exit 1 so Claude sees the rejection.  Round is 0-based (N=0 is the
+# newest exchange).
 round_arg="${3:-}"
 if [ -z "$round_arg" ]; then
-    round=1
+    round=0
 else
-    if ! [[ "$round_arg" =~ ^[0-9]+$ ]] || [ "$round_arg" -lt 1 ]; then
+    if ! [[ "$round_arg" =~ ^[0-9]+$ ]]; then
         # Escape any embedded quotes / backslashes for the elisp string.
         safe=${round_arg//\\/\\\\}
         safe=${safe//\"/\\\"}
         emacsclient --no-wait \
-            -e "(message \"ai-tracks: /at:poi round must be a positive integer, got %S\" \"$safe\")" \
+            -e "(message \"ai-tracks: /at:poi round must be a non-negative integer, got %S\" \"$safe\")" \
             >/dev/null 2>&1 &
-        echo "ai-tracks: /at:poi round must be a positive integer, got \"$round_arg\"" >&2
+        echo "ai-tracks: /at:poi round must be a non-negative integer, got \"$round_arg\"" >&2
         exit 1
     fi
     round="$round_arg"
@@ -89,7 +90,7 @@ if [ "$status" != '"ok"' ]; then
 fi
 
 emacsclient --no-wait \
-    -e "(ai-tracks-poi-add \"$session_id\" $tp_elisp $cutoff_epoch $round)" \
+    -e "(ai-tracks-poi-new $round nil \"$session_id\" $tp_elisp $cutoff_epoch)" \
     >/dev/null 2>&1 &
 
 exit 0
