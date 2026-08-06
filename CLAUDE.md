@@ -137,8 +137,14 @@ invocation.  Signature:
 `(&optional round category session-id transcript-path cutoff-epoch)`.
 The wrapper passes all five; the interactive path leaves the last
 three nil (Track is located from point, transcript is globbed).
-`round` and `category` are prompted for (`read-number` /
-`completing-read`) when nil.
+`round` can be an integer (0-based; 0 = newest), the symbol `none`
+(skip body — create heading + drawer only), or nil (prompt via
+`ai-tracks--pick-exchange`: a `completing-read` menu listing the
+newest N truncated prompts, plus a default `(no exchange — empty
+POI)` entry).  `category` is prompted for via `completing-read`
+when nil.  N and truncation width come from
+`ai-tracks-poi-picker-limit` (30) and `ai-tracks-poi-picker-width`
+(100).
 
 ### Automatic triggers
 
@@ -229,8 +235,10 @@ three nil (Track is located from point, transcript is globbed).
   via non-zero exit + stderr (Claude reports); invalid syntax
   (non-integer, negative) also exits non-zero and additionally fires
   `(message ...)` in Emacs.  `M-x ai-tracks-poi-new` (the same
-  function invoked interactively) prompts for the round via
-  `read-number' (default 0) before prompting for category.
+  function invoked interactively) instead shows a `completing-read`
+  picker of the newest exchanges (truncated first-line previews,
+  `[N] <preview>`), with a default `(no exchange — empty POI)`
+  entry so `RET` records a body-less POI.
 - **Raise Emacs**: user-facing entry points call
   `ai-tracks--raise-emacs` before returning so the GUI frame comes
   forward.  Keeps the bash wrappers minimal.

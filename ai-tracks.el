@@ -413,6 +413,13 @@ Claude Code PostToolUse hook on `ExitPlanMode') and is not offered
 in the interactive picker in practice, but it is listed here so the
 value is part of the closed set.")
 
+(defvar ai-tracks-poi-picker-limit 30
+  "Maximum number of recent exchanges shown in the `ai-tracks-poi-new' picker.")
+
+(defvar ai-tracks-poi-picker-width 100
+  "Truncation width (in characters) for prompt previews in the
+`ai-tracks-poi-new' picker.  Set to nil for no truncation.")
+
 (defun ai-tracks--jsonl-genuine-user-p (obj)
   "Return non-nil if OBJ is a genuine user turn (not a tool_result carrier).
 OBJ is a parsed JSONL entry as an alist.  Recognises two shapes:
@@ -514,27 +521,18 @@ unreadable."
           (forward-line 1)))
       objs)))
 
-(defun ai-tracks--nth-exchange (transcript-path n &optional cutoff-epoch)
-  "Return a plist describing the Nth-most-recent user-prompt / assistant-answer exchange.
-N is 0-based: N=0 is the newest exchange (the one just before the
-slash-command trigger), N=1 skips the newest and returns the one
-before it, and so on.
+(defun ai-tracks--all-exchanges (transcript-path &optional cutoff-epoch)
+  "Return every user-prompt / assistant-answer exchange in TRANSCRIPT-PATH.
+Result is a list of plists (`:user' text, `:assistant' text) ordered
+newest first.  When CUTOFF-EPOCH is non-nil, entries with `timestamp'
+strictly greater than CUTOFF-EPOCH are ignored (used by /at:poi to
+prune Claude's own reply to the trigger).
 
-Reads TRANSCRIPT-PATH (a JSONL file).  When CUTOFF-EPOCH is non-nil,
-entries with `timestamp' strictly greater than CUTOFF-EPOCH are
-ignored — this prunes anything Claude wrote in response to the
-slash-command trigger itself (which lands in the transcript before
-Emacs gets a chance to read it).
-
-The plist has:
-  :user       string — text of the genuine user message that triggered
-                       Claude's answer for this round, or nil if not
-                       found.
-  :assistant  string — concatenated `text' blocks from all assistant
-                       messages between the following genuine user
-                       turn and this round's user prompt.
-
-Returns nil when fewer than N+1 complete exchanges are available."
+Walk semantics: since the transcript is newest→oldest, assistant
+text blocks are accumulated until a genuine user turn closes the
+round; that user turn is the round's prompt.  Consecutive user
+turns at the head (slash-command marker + text body) are skipped
+until we have real assistant text to close."
   (let* ((all-objs (ai-tracks--read-jsonl transcript-path))
          (objs (if cutoff-epoch
                    (seq-filter
@@ -543,35 +541,76 @@ Returns nil when fewer than N+1 complete exchanges are available."
                         (or (null e) (<= e cutoff-epoch))))
                     all-objs)
                  all-objs))
-         (rounds-collected 0)
          texts
-         result)
-    ;; Walk newest→oldest.  For each round we accumulate assistant
-    ;; text blocks until a genuine user turn closes the round; that
-    ;; user turn is the round's prompt.  If it is the Nth round we
-    ;; capture the plist and stop; otherwise we reset the assistant
-    ;; accumulator and continue looking for an older round.
-    ;;
-    ;; Note the `(and texts ...)' guard: consecutive user turns at
-    ;; the head of the transcript (slash-command marker + text body)
-    ;; are skipped until we have real assistant text to close.
-    (catch 'done
-      (dolist (obj objs)
-        (cond
-         ((and texts (ai-tracks--jsonl-genuine-user-p obj))
-          (when (= rounds-collected n)
-            (setq result
-                  (list :user      (ai-tracks--jsonl-user-text obj)
-                        :assistant (mapconcat #'identity
-                                              (nreverse texts)
-                                              "\n\n")))
-            (throw 'done nil))
-          (setq rounds-collected (1+ rounds-collected))
-          (setq texts nil))
-         (t
-          (when-let ((txt (ai-tracks--jsonl-assistant-text obj)))
-            (push txt texts))))))
-    result))
+         exchanges)
+    (dolist (obj objs)
+      (cond
+       ((and texts (ai-tracks--jsonl-genuine-user-p obj))
+        (push (list :user      (ai-tracks--jsonl-user-text obj)
+                    :assistant (mapconcat #'identity
+                                          (nreverse texts)
+                                          "\n\n"))
+              exchanges)
+        (setq texts nil))
+       (t
+        (when-let ((txt (ai-tracks--jsonl-assistant-text obj)))
+          (push txt texts)))))
+    (nreverse exchanges)))
+
+(defun ai-tracks--nth-exchange (transcript-path n &optional cutoff-epoch)
+  "Return the Nth-most-recent exchange from TRANSCRIPT-PATH, or nil.
+N is 0-based: 0 is the newest, 1 skips the newest and returns the
+one before it, and so on.  Thin wrapper over `ai-tracks--all-exchanges'
+so both the picker and the round-based path share one walker."
+  (nth n (ai-tracks--all-exchanges transcript-path cutoff-epoch)))
+
+(defun ai-tracks--exchange-label (round exchange width)
+  "Return a single-line completion label for EXCHANGE at ROUND.
+The user prompt is trimmed, whitespace-collapsed to one line, and
+truncated to WIDTH characters (nil = no truncation) with a trailing
+`…'.  Formatted as `[ROUND] <preview>' so the numeric round is
+visible next to the preview."
+  (let* ((prompt (or (plist-get exchange :user) ""))
+         (line (replace-regexp-in-string "\\s-+" " " (string-trim prompt)))
+         (preview (if (and width (> (length line) width))
+                      (concat (substring line 0 width) "…")
+                    line)))
+    (format "[%d] %s" round preview)))
+
+(defun ai-tracks--pick-exchange (transcript-path &optional cutoff-epoch)
+  "Prompt the user via `completing-read' to pick an exchange to embed.
+Presents the newest `ai-tracks-poi-picker-limit' exchanges from
+TRANSCRIPT-PATH, each labelled by `ai-tracks--exchange-label',
+prefixed by a `(no exchange — empty POI)' option that is the default
+(RET accepts it).
+
+The completion table declares `display-sort-function' and
+`cycle-sort-function' as `identity' so completion frameworks
+(vertico, ivy, …) preserve the newest-first insertion order
+instead of alphabetising.
+
+Returns the 0-based round index of the chosen exchange, or the
+symbol `none' for the empty-POI choice."
+  (let* ((exchanges (seq-take (ai-tracks--all-exchanges transcript-path cutoff-epoch)
+                              ai-tracks-poi-picker-limit))
+         (none-label "(no exchange — empty POI)")
+         (alist (cons (cons none-label 'none)
+                      (seq-map-indexed
+                       (lambda (ex round)
+                         (cons (ai-tracks--exchange-label
+                                round ex ai-tracks-poi-picker-width)
+                               round))
+                       exchanges)))
+         (candidates (mapcar #'car alist))
+         (collection
+          (lambda (string pred action)
+            (if (eq action 'metadata)
+                '(metadata (display-sort-function . identity)
+                           (cycle-sort-function . identity))
+              (complete-with-action action candidates string pred))))
+         (choice (completing-read "POI exchange: "
+                                  collection nil t nil nil none-label)))
+    (cdr (assoc choice alist))))
 
 (defun ai-tracks--poi-round-status (transcript-path cutoff-epoch n)
   "Return \"ok\" if round N of TRANSCRIPT-PATH is retrievable, else an error string.
@@ -983,15 +1022,20 @@ means point is not inside an ai-tracks Track."
 
 ;;;###autoload
 (defun ai-tracks-poi-new (&optional round category session-id transcript-path cutoff-epoch)
-  "Append an explicit POI under a Track and embed the ROUND-th prior exchange.
+  "Append an explicit POI under a Track and optionally embed a prior exchange.
 Single implementation for both the in-Emacs `M-x ai-tracks-poi-new'
 path and the `/at:poi' bash wrapper.
 
-ROUND is 0-based: 0 selects the newest exchange, 1 skips the newest
-and selects the one before it, and so on.  CATEGORY is one of
-`ai-tracks-poi-categories'.  Both are `&optional' — nil prompts.
-Interactively, ROUND is read via `read-number' (default 0) and then
-CATEGORY via `completing-read'.
+ROUND selects which exchange (if any) to embed as the POI body:
+  - integer (0-based): 0 is the newest, 1 skips it and picks the one
+    before, and so on.
+  - symbol `none': skip embedding — the POI is created with just its
+    heading and drawer.
+  - nil: interactive — prompt via `ai-tracks--pick-exchange'
+    (`completing-read' menu of truncated prompts, default is `none').
+
+CATEGORY is one of `ai-tracks-poi-categories'; nil prompts via
+`completing-read'.
 
 Track lookup:
 - When SESSION-ID is non-nil (typically from the bash wrapper), the
@@ -1006,28 +1050,23 @@ timestamp; JSONL entries newer than it are ignored (the wrapper
 passes its own invocation time so Claude's response to /at:poi is
 not pulled in).  Interactive callers leave it nil.
 
-The user prompt and Claude's answer are extracted via
-`ai-tracks--nth-exchange', converted markdown→org via pandoc, and
-inserted as the POI body: the prompt inside a `#+begin_quote'
-block, followed by the answer.  Point lands on a blank line below
-so the user can add their own commentary.
+When embedding, the user prompt and Claude's answer are converted
+markdown→org via pandoc and inserted as the POI body: the prompt
+inside a `#+begin_quote' block, followed by the answer.  Point
+lands on a blank line below so the user can add their own
+commentary.  When ROUND is `none', point lands on the first line
+under the drawer instead.
 
 Signals `user-error' — inserting nothing — when the Track cannot
-be located, no transcript file exists for the session, or ROUND is
-out of range.  Returns the POI's timestamp string on success."
-  (interactive
-   (list (read-number "POI round (0 = newest): " 0)
-         (completing-read "POI category: "
-                          ai-tracks-poi-categories nil t)))
-  (let* ((round (or round (read-number "POI round (0 = newest): " 0)))
-         (category (or category
-                       (completing-read "POI category: "
-                                        ai-tracks-poi-categories nil t)))
-         (track-marker (if session-id
-                           (ai-tracks--track-marker session-id)
-                         (or (ai-tracks--enclosing-track-marker)
-                             (user-error
-                              "ai-tracks: point is not inside an ai-tracks Track")))))
+be located, no transcript file exists for the session, or an
+integer ROUND is out of range.  Returns the POI's timestamp string
+on success."
+  (interactive)
+  (let ((track-marker (if session-id
+                          (ai-tracks--track-marker session-id)
+                        (or (ai-tracks--enclosing-track-marker)
+                            (user-error
+                             "ai-tracks: point is not inside an ai-tracks Track")))))
     (let* ((session-id
             (or session-id
                 (let ((tid (org-with-point-at track-marker
@@ -1040,26 +1079,35 @@ out of range.  Returns the POI's timestamp string on success."
                        (format "~/.claude/projects/*/%s.jsonl" session-id)))))))
       (unless (and transcript-path (file-readable-p transcript-path))
         (user-error "ai-tracks: no transcript found for session %s" session-id))
-      (let ((status (ai-tracks--poi-round-status transcript-path cutoff-epoch round)))
-        (unless (equal status "ok")
-          (user-error "ai-tracks: %s" status)))
-      (let* ((exchange (ai-tracks--nth-exchange transcript-path round cutoff-epoch))
-             (now (current-time))
-             (title (format-time-string "POI [%Y-%m-%d %a %H:%M]" now))
-             (ts (format-time-string "[%Y-%m-%d %a %H:%M]" now)))
-        (switch-to-buffer (marker-buffer track-marker))
-        (goto-char (marker-position track-marker))
-        (goto-char (save-excursion (org-end-of-subtree t t)))
-        (unless (bolp) (insert "\n"))
-        (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: %s\n:CLAUDE-POI: %s\n:END:\n"
-                        title category ts))
-        (let ((warnings (ai-tracks--insert-poi-body exchange)))
+      (let* ((round (cond ((eq round 'none) 'none)
+                          ((integerp round) round)
+                          (t (ai-tracks--pick-exchange transcript-path cutoff-epoch))))
+             (category (or category
+                           (completing-read "POI category: "
+                                            ai-tracks-poi-categories nil t))))
+        (unless (eq round 'none)
+          (let ((status (ai-tracks--poi-round-status transcript-path cutoff-epoch round)))
+            (unless (equal status "ok")
+              (user-error "ai-tracks: %s" status))))
+        (let* ((now (current-time))
+               (title (format-time-string "POI [%Y-%m-%d %a %H:%M]" now))
+               (ts (format-time-string "[%Y-%m-%d %a %H:%M]" now)))
+          (switch-to-buffer (marker-buffer track-marker))
+          (goto-char (marker-position track-marker))
+          (goto-char (save-excursion (org-end-of-subtree t t)))
+          (unless (bolp) (insert "\n"))
+          (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: %s\n:CLAUDE-POI: %s\n:END:\n"
+                          title category ts))
+          (unless (eq round 'none)
+            (let* ((exchange (ai-tracks--nth-exchange transcript-path round cutoff-epoch))
+                   (warnings (ai-tracks--insert-poi-body exchange)))
+              (when warnings
+                (message "ai-tracks: %s"
+                         (mapconcat #'identity warnings "; ")))))
           (org-reveal)
           (save-buffer)
-          (when warnings
-            (message "ai-tracks: %s" (mapconcat #'identity warnings "; "))))
-        (ai-tracks--raise-emacs)
-        ts))))
+          (ai-tracks--raise-emacs)
+          ts)))))
 
 ;;;; Navigation
 
@@ -1160,8 +1208,14 @@ Sorted by :CLAUDE-STARTED: descending (most recent first)."
 
 (defun ai-tracks--candidate-label (node)
   "Return a display label for NODE candidate in the picker.
-Uses the node title from the org-roam DB — no file I/O."
-  (org-roam-node-title node))
+Formatted as `<parent> -- <track-title>' so the user can tell
+Tracks apart by the enclosing level-1 org-roam node (which
+carries the topic).  Falls back to `??' when NODE has no
+outline path (e.g. a Track sitting directly at file level).
+Uses the org-roam DB only — no file I/O."
+  (format "%s -- %s"
+          (or (car (org-roam-node-olp node)) "??")
+          (org-roam-node-title node)))
 
 (defun ai-tracks--pick-track (candidates)
   "Prompt the user to pick a Track from CANDIDATES, or (skip).

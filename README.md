@@ -169,19 +169,24 @@ Emacs comes forward to show you the resulting POI or capture prompt.
 ## Adding a POI directly from Emacs
 
 `M-x ai-tracks-poi-new` invokes the same function `/at:poi` does,
-just without going through Claude.  Emacs prompts for the round
-first (`read-number`, default 0 = newest exchange, `RET` accepts)
-and then for the category, then appends a level-4 POI to the
-enclosing Track with the selected exchange as its body (user
-prompt in a `#+begin_quote`, Claude's answer following it, both
-pandoc-converted markdown→org).  Point lands on a blank line
-below so you can add your own commentary.
+just without going through Claude.  Emacs first shows a
+`completing-read` picker of the newest exchanges — each row is
+`[N] <first line of prompt, truncated>` — with a default entry
+`(no exchange — empty POI)` so `RET` records a POI with just the
+heading and drawer (no body).  Pick an exchange to embed it as
+the body (user prompt in a `#+begin_quote`, Claude's answer
+following, both pandoc-converted markdown→org); point lands on a
+blank line below so you can add your own commentary.  After the
+exchange choice Emacs prompts for the category.
+
+The picker's depth and preview width are controlled by
+`ai-tracks-poi-picker-limit` (default 30) and
+`ai-tracks-poi-picker-width` (default 100 chars).
 
 Must be invoked from inside a Track subtree so the session UUID
 can be derived from the enclosing Track's `:ID:`.  Signals a
 `user-error` — inserting nothing — when point is not inside a
-Track, no transcript file exists for this session, or the round
-is out of range.
+Track or no transcript file exists for this session.
 
 ## Typical workflow
 
