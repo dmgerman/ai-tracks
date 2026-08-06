@@ -1229,14 +1229,25 @@ Uses the org-roam DB only — no file I/O."
 
 (defun ai-tracks--pick-track (candidates)
   "Prompt the user to pick a Track from CANDIDATES, or (skip).
-Returns the chosen org-roam-node, or nil for skip / abort."
+CANDIDATES arrive newest-first (sorted by `:CLAUDE-STARTED:'
+descending in `ai-tracks--commit-candidates').  The completion
+table declares `display-sort-function' and `cycle-sort-function'
+as `identity' so vertico/ivy/… preserve that order instead of
+alphabetising.  Returns the chosen org-roam-node, or nil for
+skip / abort."
   (let* ((labels (mapcar (lambda (n) (cons (ai-tracks--candidate-label n) n))
                          candidates))
          (skip   "(skip — not a tracked commit)")
          (choices (append (mapcar #'car labels) (list skip)))
+         (collection
+          (lambda (string pred action)
+            (if (eq action 'metadata)
+                '(metadata (display-sort-function . identity)
+                           (cycle-sort-function . identity))
+              (complete-with-action action choices string pred))))
          (choice (completing-read
                   "Attach commit to Track: "
-                  choices nil t nil nil (car choices))))
+                  collection nil t nil nil (car choices))))
     (unless (string= choice skip)
       (cdr (assoc choice labels)))))
 
