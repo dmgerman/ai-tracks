@@ -249,11 +249,9 @@ Signals a user-error if none is found."
              (when (or (not latest) (string> ts latest))
                (setq latest ts)))))
        nil 'tree))
-    (prog1
-        (or latest
-            (user-error "ai-tracks: no boundary timestamp on Track for %s"
-                        session-id))
-      (ai-tracks--raise-emacs))))
+    (or latest
+        (user-error "ai-tracks: no boundary timestamp on Track for %s"
+                    session-id))))
 
 (defun ai-tracks--recap-format-section (heading items)
   "Return a string for one level-5 recap section with HEADING and ITEMS.
@@ -286,7 +284,13 @@ summary, files, decisions, open, next — each an array of short strings.
 TITLE-PREFIX prefixes the timestamp in the heading title (e.g. \"Recap\",
 \"End of session\").  PROPERTY-KEY is the drawer key holding the entry's
 timestamp (e.g. \"CLAUDE-RECAPPED\").  CATEGORY is the :POI-CATEGORY:
-value."
+value.
+
+Switches to the Track's buffer and lands point on the inserted
+heading's title line so the user sees the fresh POI when the
+top-level caller raises Emacs.  Does not raise on its own — that
+is the caller's responsibility, so end-session (which does further
+work after this returns) can raise once at the end."
   (let* ((marker (ai-tracks--track-marker session-id))
          (now   (current-time))
          (title (format-time-string
@@ -295,25 +299,29 @@ value."
          (sections '((files     . "Files touched")
                      (decisions . "Decisions")
                      (open      . "Open threads")
-                     (next      . "Next"))))
-    (org-with-point-at marker
-      (goto-char (save-excursion (org-end-of-subtree t t)))
-      (unless (bolp) (insert "\n"))
-      (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: %s\n:%s: %s\n:END:\n"
-                      title category property-key ts))
-      ;; Summary bullets are the heading's own body text: a narrative
-      ;; list of what was accomplished, above the per-topic level-5
-      ;; sections below.
-      (let ((summary (alist-get 'summary payload)))
-        (when (and summary (listp summary) (> (length summary) 0))
-          (dolist (item summary)
-            (insert (format "- %s\n" item)))))
-      (dolist (section sections)
-        (insert (ai-tracks--recap-format-section
-                 (cdr section)
-                 (alist-get (car section) payload))))
-      (save-buffer))
-    (ai-tracks--raise-emacs)
+                     (next      . "Next")))
+         heading-pos)
+    (switch-to-buffer (marker-buffer marker))
+    (goto-char (marker-position marker))
+    (goto-char (save-excursion (org-end-of-subtree t t)))
+    (unless (bolp) (insert "\n"))
+    (setq heading-pos (point))
+    (insert (format "**** %s\n:PROPERTIES:\n:POI-CATEGORY: %s\n:%s: %s\n:END:\n"
+                    title category property-key ts))
+    ;; Summary bullets are the heading's own body text: a narrative
+    ;; list of what was accomplished, above the per-topic level-5
+    ;; sections below.
+    (let ((summary (alist-get 'summary payload)))
+      (when (and summary (listp summary) (> (length summary) 0))
+        (dolist (item summary)
+          (insert (format "- %s\n" item)))))
+    (dolist (section sections)
+      (insert (ai-tracks--recap-format-section
+               (cdr section)
+               (alist-get (car section) payload))))
+    (save-buffer)
+    (goto-char heading-pos)
+    (org-reveal)
     ts))
 
 (defun ai-tracks--find-or-create-summary-node (track-marker)
@@ -377,9 +385,11 @@ No-op when ITEMS is nil or empty."
 (defun ai-tracks-recap-add (session-id json-file)
   "Append a Recap POI under the Track for SESSION-ID.
 See `ai-tracks--insert-recap-like' for the JSON schema."
-  (ai-tracks--insert-recap-like
-   session-id (ai-tracks--read-payload json-file)
-   "Recap" "CLAUDE-RECAPPED" "Recap"))
+  (prog1
+      (ai-tracks--insert-recap-like
+       session-id (ai-tracks--read-payload json-file)
+       "Recap" "CLAUDE-RECAPPED" "Recap")
+    (ai-tracks--raise-emacs)))
 
 (defun ai-tracks-end-session-add (session-id json-file)
   "Append an End-of-session POI and update the Track's rolling Summary.
@@ -397,9 +407,9 @@ Same JSON schema as `ai-tracks-recap-add'."
          (marker (ai-tracks--track-marker session-id)))
     (ai-tracks--append-to-summary session-id (alist-get 'summary payload))
     (ai-tracks--mark-last-plan-poi-finished marker ts)
-    ;; `insert-recap-like' raises Emacs, but the two calls above run
-    ;; after that and may take a moment; raise again so the frame is
-    ;; foregrounded as the wrapper returns to the terminal.
+    ;; Single raise after every side-effect has landed, so the user
+    ;; sees the Track buffer (switched to by `insert-recap-like') with
+    ;; the fresh POI selected.
     (ai-tracks--raise-emacs)
     ts))
 

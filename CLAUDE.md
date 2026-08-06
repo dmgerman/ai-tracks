@@ -239,9 +239,10 @@ when nil.  N and truncation width come from
   picker of the newest exchanges (truncated first-line previews,
   `[N] <preview>`), with a default `(no exchange — empty POI)`
   entry so `RET` records a body-less POI.
-- **Raise Emacs**: user-facing entry points call
-  `ai-tracks--raise-emacs` before returning so the GUI frame comes
-  forward.  Keeps the bash wrappers minimal.
+- **Raise Emacs**: only top-level entry points that produce a visible
+  side-effect call `ai-tracks--raise-emacs`, once at the end.
+  Recap-like inserters `switch-to-buffer` first so the raise brings
+  the Track buffer forward.
 
 ## Files
 
