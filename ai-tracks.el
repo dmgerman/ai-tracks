@@ -1195,26 +1195,44 @@ Accepts SSH, HTTPS, and ssh:// forms and strips a trailing .git."
              (file-exists-p (expand-file-name "CHERRY_PICK_HEAD" gitdir))))))
 
 (defun ai-tracks--commit-candidates (commit-cwd)
-  "Return org-roam nodes whose :CLAUDE-CWD: is COMMIT-CWD or an ancestor.
-Sorted by :CLAUDE-STARTED: descending (most recent first)."
-  (let ((commit-dir (file-name-as-directory (expand-file-name commit-cwd))))
-    (sort
-     (seq-filter
-      (lambda (node)
-        (and (string-prefix-p "claude-" (org-roam-node-id node))
-             (let ((cwd (ai-tracks--unwrap-cwd
-                         (cdr (assoc "CLAUDE-CWD"
-                                     (org-roam-node-properties node))))))
-               (and cwd
-                    (string-prefix-p
-                     (file-name-as-directory (expand-file-name cwd))
-                     commit-dir)))))
-      (org-roam-node-list))
-     (lambda (a b)
-       (string> (or (cdr (assoc "CLAUDE-STARTED"
-                                (org-roam-node-properties a))) "")
-                (or (cdr (assoc "CLAUDE-STARTED"
-                                (org-roam-node-properties b))) ""))))))
+  "Return org-roam Track nodes relevant to a commit at COMMIT-CWD.
+Preferred set: Tracks whose `:CLAUDE-CWD:' is inside the worktree
+— equal to COMMIT-CWD or a descendant of it (a session started
+in this repo, possibly under a subdirectory).  When that set is
+empty, falls back to Tracks whose `:CLAUDE-CWD:' is a strict
+ancestor of COMMIT-CWD (a broader-scope session that happens to
+overlap this repo).  Sorted by `:CLAUDE-STARTED:' descending
+(most recent first)."
+  (let* ((commit-dir (file-name-as-directory (expand-file-name commit-cwd)))
+         (pairs
+          (mapcar
+           (lambda (node)
+             (cons node
+                   (when-let ((raw (cdr (assoc "CLAUDE-CWD"
+                                               (org-roam-node-properties node)))))
+                     (let ((unwrapped (ai-tracks--unwrap-cwd raw)))
+                       (and unwrapped
+                            (file-name-as-directory
+                             (expand-file-name unwrapped)))))))
+           (seq-filter
+            (lambda (n) (string-prefix-p "claude-" (org-roam-node-id n)))
+            (org-roam-node-list))))
+         (in-repo (seq-filter
+                   (lambda (p)
+                     (and (cdr p) (string-prefix-p commit-dir (cdr p))))
+                   pairs))
+         (ancestor (seq-filter
+                    (lambda (p)
+                      (and (cdr p)
+                           (not (string= commit-dir (cdr p)))
+                           (string-prefix-p (cdr p) commit-dir)))
+                    pairs)))
+    (sort (mapcar #'car (or in-repo ancestor))
+          (lambda (a b)
+            (string> (or (cdr (assoc "CLAUDE-STARTED"
+                                     (org-roam-node-properties a))) "")
+                     (or (cdr (assoc "CLAUDE-STARTED"
+                                     (org-roam-node-properties b))) ""))))))
 
 (defun ai-tracks--candidate-label (node)
   "Return a display label for NODE candidate in the picker.

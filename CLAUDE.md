@@ -181,8 +181,10 @@ when nil.  N and truncation width come from
   lighter `AITrk`). When on, hooks
   `git-commit-post-finish-hook` (message-editing commits) and
   `magit-post-commit-hook` (`--no-edit` / `--amend --no-edit`). On
-  every magit commit it looks up Tracks whose `:CLAUDE-CWD:` is an
-  ancestor of the commit's git worktree root and, if any match, pops a
+  every magit commit it looks up Tracks whose `:CLAUDE-CWD:` is
+  inside the worktree root (equal or descendant); only if none exist
+  does it fall back to Tracks whose `:CLAUDE-CWD:` is a strict
+  ancestor of the worktree root.  If any match, pops a
   `completing-read` for the user to attach or skip. Command-line
   commits are deliberately outside this scope. Rebase / cherry-pick
   are auto-skipped (detected via `.git/rebase-*`, `CHERRY_PICK_HEAD`).
