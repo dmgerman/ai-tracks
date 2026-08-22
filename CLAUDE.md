@@ -220,9 +220,14 @@ when nil.  N and truncation width come from
   `node+headline` target from `org-roam-gt-capture`. The
   session-start function turns the minor mode on if needed
   (`(unless org-roam-gt-mode (org-roam-gt-mode 1))`).
-- **`/at:poi` transcript injection**: the wrapper globs
-  `~/.claude/projects/*/<session-id>.jsonl` (session UUID is unique)
-  and passes a Unix-epoch cutoff so Emacs can prune newer entries —
+- **`/at:poi` transcript injection**: Emacs resolves the transcript
+  (`ai-tracks--transcript-path`), not the wrapper.  A compaction ends
+  `~/.claude/projects/*/<session-id>.jsonl` and continues in a sibling
+  named after a fresh per-leg `sessionId`, while hooks keep reporting
+  the original id; the continuation carries the original in each
+  entry's `session_id`, so the resolver follows that chain forward to
+  the newest leg.  The wrapper passes a Unix-epoch cutoff so Emacs
+  can prune newer entries —
   they'd be Claude's own response to `/at:poi`, already flushed to
   the transcript by the time Emacs reads it.  Extraction returns a
   user prompt and Claude's answer; both are pandoc'd markdown→org

@@ -10,16 +10,17 @@
 # message; Claude then reports the failure to the user instead of
 # silently attaching an empty POI.
 #
-# We also locate this session's Claude Code transcript (JSONL) and
-# hand its path to Emacs.  Emacs extracts the selected exchange from
-# the transcript, converts it markdown->org via pandoc, and inserts
-# it as the POI body.
+# Emacs extracts the selected exchange from this session's Claude
+# Code transcript (JSONL), converts it markdown->org via pandoc, and
+# inserts it as the POI body.  Locating that transcript is Emacs's
+# job (`ai-tracks--transcript-path'): the file named after the
+# session id stops at the first context compaction, and the live
+# leg lives in a differently-named sibling.  We pass a path only
+# when the caller supplied one explicitly.
 #
 # Usage:  ai-tracks-poi.sh [<session-id> [<transcript-path> [<round>]]]
-# Falls back to $CLAUDE_CODE_SESSION_ID if no session-id given.  If
-# no transcript-path given, globs ~/.claude/projects/*/<session-id>.jsonl
-# (the session UUID is unique across projects).  Round is 0-based and
-# defaults to 0 (the most recent exchange).
+# Falls back to $CLAUDE_CODE_SESSION_ID if no session-id given.
+# Round is 0-based and defaults to 0 (the most recent exchange).
 
 set -u
 
@@ -37,14 +38,6 @@ if [ -z "$session_id" ]; then
 fi
 
 transcript_path="${2:-}"
-if [ -z "$transcript_path" ]; then
-    for candidate in "$HOME"/.claude/projects/*/"$session_id".jsonl; do
-        if [ -f "$candidate" ]; then
-            transcript_path="$candidate"
-            break
-        fi
-    done
-fi
 
 if [ -n "$transcript_path" ]; then
     tp_elisp="\"$transcript_path\""
@@ -80,7 +73,7 @@ cutoff_epoch=$(date +%s)
 # Blocking pre-check: is round N retrievable?  Runs quickly (JSONL
 # walk) and returns a quoted elisp string.
 status=$(emacsclient \
-    -e "(ai-tracks--poi-round-status $tp_elisp $cutoff_epoch $round)" 2>&1)
+    -e "(ai-tracks--poi-round-status $tp_elisp $cutoff_epoch $round \"$session_id\")" 2>&1)
 if [ "$status" != '"ok"' ]; then
     # Strip surrounding quotes for a cleaner terminal message.
     trimmed="${status#\"}"

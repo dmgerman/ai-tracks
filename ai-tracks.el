@@ -532,6 +532,52 @@ unreadable."
           (forward-line 1)))
       objs)))
 
+(defun ai-tracks--transcript-mentions-any-p (path session-ids)
+  "Return non-nil if PATH has a `session_id' field equal to any of SESSION-IDS.
+Claude Code stamps the *logical* session id in each entry's
+`session_id' while naming the file after the per-leg `sessionId';
+the two diverge once a session is compacted.  Matching is a literal
+substring search: the file is machine-written JSON with no
+whitespace between key and value."
+  (with-temp-buffer
+    (insert-file-contents path)
+    (seq-some (lambda (id)
+                (goto-char (point-min))
+                (search-forward (format "\"session_id\":\"%s\"" id) nil t))
+              session-ids)))
+
+(defun ai-tracks--transcript-path (session-id)
+  "Return the newest transcript file belonging to SESSION-ID, or nil.
+The transcript is normally `~/.claude/projects/*/<session-id>.jsonl'.
+When a session runs out of context Claude Code compacts it and
+continues in a *new* file named after a fresh per-leg `sessionId',
+while hooks and slash commands keep reporting the original id — so
+the file named after SESSION-ID stops at the compaction point.  Each
+continuation records the ids of the legs it descends from in its
+entries' `session_id' field, so we follow that chain forward: look
+for a sibling in the same project directory that is newer than the
+current leg and mentions one of the ids seen so far, and repeat
+until no further continuation exists."
+  (let ((head (car (file-expand-wildcards
+                    (expand-file-name
+                     (format "~/.claude/projects/*/%s.jsonl" session-id))))))
+    (when head
+      (let ((dir (file-name-directory head))
+            (path head)
+            (seen (list session-id)))
+        (catch 'done
+          (while t
+            (let ((next (car (sort (seq-filter
+                                    (lambda (f)
+                                      (and (not (member (file-name-base f) seen))
+                                           (file-newer-than-file-p f path)
+                                           (ai-tracks--transcript-mentions-any-p f seen)))
+                                    (directory-files dir t "\\.jsonl\\'"))
+                                   #'file-newer-than-file-p))))
+              (unless next (throw 'done path))
+              (push (file-name-base next) seen)
+              (setq path next))))))))
+
 (defun ai-tracks--all-exchanges (transcript-path &optional cutoff-epoch)
   "Return every user-prompt / assistant-answer exchange in TRANSCRIPT-PATH.
 Result is a list of plists (`:user' text, `:assistant' text) ordered
@@ -623,26 +669,33 @@ symbol `none' for the empty-POI choice."
                                   collection nil t nil nil none-label)))
     (cdr (assoc choice alist))))
 
-(defun ai-tracks--poi-round-status (transcript-path cutoff-epoch n)
+(defun ai-tracks--poi-round-status (transcript-path cutoff-epoch n &optional session-id)
   "Return \"ok\" if round N of TRANSCRIPT-PATH is retrievable, else an error string.
 Used by the /at:poi wrapper as a blocking pre-check so range errors
 surface to Claude via the wrapper's exit code and stderr, rather than
 silently producing an empty POI.
+
+When TRANSCRIPT-PATH is nil and SESSION-ID is given, the transcript
+is resolved with `ai-tracks--transcript-path' so this pre-check reads
+the same file `ai-tracks-poi-new' will.
 
 N is 0-based (N=0 is the newest exchange).  `ok' means:
 TRANSCRIPT-PATH is a readable file and at least N+1 complete
 (user prompt + assistant answer) exchanges are available older than
 CUTOFF-EPOCH.  Any other outcome returns a short human-readable
 diagnostic string."
-  (cond
-   ((not (and (integerp n) (>= n 0)))
-    (format "round must be a non-negative integer, got %S" n))
-   ((not (and transcript-path (file-readable-p transcript-path)))
-    (format "transcript unreadable: %s" (or transcript-path "<none>")))
-   ((not (ai-tracks--nth-exchange transcript-path n cutoff-epoch))
-    (format "requested round %d not available (fewer than %d complete exchanges)"
-            n (1+ n)))
-   (t "ok")))
+  (let ((transcript-path (or transcript-path
+                             (and session-id
+                                  (ai-tracks--transcript-path session-id)))))
+    (cond
+     ((not (and (integerp n) (>= n 0)))
+      (format "round must be a non-negative integer, got %S" n))
+     ((not (and transcript-path (file-readable-p transcript-path)))
+      (format "transcript unreadable: %s" (or transcript-path "<none>")))
+     ((not (ai-tracks--nth-exchange transcript-path n cutoff-epoch))
+      (format "requested round %d not available (fewer than %d complete exchanges)"
+              n (1+ n)))
+     (t "ok"))))
 
 (defun ai-tracks--markdown-to-org (markdown &optional heading-shift)
   "Convert MARKDOWN string to org via pandoc.
@@ -1055,8 +1108,8 @@ Track lookup:
   located from point; SESSION-ID is then derived from its `:ID:'
   (stripping the `claude-' prefix).
 
-When TRANSCRIPT-PATH is nil, globs
-`~/.claude/projects/*/<session-id>.jsonl'.  CUTOFF-EPOCH is a Unix
+When TRANSCRIPT-PATH is nil, it is resolved from SESSION-ID via
+`ai-tracks--transcript-path'.  CUTOFF-EPOCH is a Unix
 timestamp; JSONL entries newer than it are ignored (the wrapper
 passes its own invocation time so Claude's response to /at:poi is
 not pulled in).  Interactive callers leave it nil.
@@ -1085,9 +1138,7 @@ on success."
                   (substring tid (length "claude-")))))
            (transcript-path
             (or transcript-path
-                (car (file-expand-wildcards
-                      (expand-file-name
-                       (format "~/.claude/projects/*/%s.jsonl" session-id)))))))
+                (ai-tracks--transcript-path session-id))))
       (unless (and transcript-path (file-readable-p transcript-path))
         (user-error "ai-tracks: no transcript found for session %s" session-id))
       (let* ((round (cond ((eq round 'none) 'none)
