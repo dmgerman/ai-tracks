@@ -104,6 +104,7 @@ the SessionStart JSON payload; either may be nil."
           `(("t" "AI Track"
              entry ,body
              :target (node+headline nil "AI Tracks")
+             :filter-fn dmg-org-roam-parea-p
              :jump-to-captured
              :empty-lines 1))))
     (ai-tracks--raise-emacs)
