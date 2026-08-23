@@ -107,8 +107,8 @@ the SessionStart JSON payload; either may be nil."
              :filter-fn dmg-org-roam-parea-p
              :jump-to-captured t
              :empty-lines 1))))
-    (ai-tracks--raise-emacs))
-  (org-roam-capture-))
+    (ai-tracks--raise-emacs)
+    (org-roam-capture-)))
 
 ;;;###autoload
 (defun ai-tracks-resume-add (session-id)
