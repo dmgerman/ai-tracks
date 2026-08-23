@@ -1200,7 +1200,8 @@ Signals a user-error if no Track is registered for this session."
   "Return the git worktree root at `default-directory', or nil."
   (and (fboundp 'magit-toplevel) (magit-toplevel)))
 
-(declare-function magit-get "magit-git")
+(declare-function magit-get                "magit-git")
+(declare-function magit-get-current-branch "magit-git")
 
 (defun ai-tracks--origin-url ()
   "Return the URL of the `origin' remote, or nil if none is configured."
@@ -1231,6 +1232,9 @@ Accepts SSH, HTTPS, and ssh:// forms and strips a trailing .git."
           :sha     sha
           :short   (magit-rev-parse "--short" "HEAD")
           :url     (ai-tracks--github-commit-url sha)
+          :repo    (ai-tracks--origin-url)
+          :branch  (and (fboundp 'magit-get-current-branch)
+                        (magit-get-current-branch))
           :subject (magit-git-string "log" "-1" "--pretty=%s" "HEAD")
           :body    (mapconcat #'identity
                               (magit-git-lines "log" "-1" "--pretty=%b" "HEAD")
@@ -1336,13 +1340,20 @@ entry so the user can add or edit, and saves the buffer immediately."
     (let* ((now (current-time))
            (ts  (format-time-string "[%Y-%m-%d %a %H:%M]" now)))
       (insert (format
-               "**** Commit %s %s — %s\n:PROPERTIES:\n:POI-CATEGORY: Commit\n:CLAUDE-COMMIT: %s\n:COMMIT-SHA: %s\n:COMMIT-AUTHOR: %s\n:END:\n"
+               (concat "**** Commit %s %s — %s\n:PROPERTIES:\n"
+                       ":POI-CATEGORY: Commit\n:CLAUDE-COMMIT: %s\n"
+                       ":COMMIT-SHA: %s\n:COMMIT-AUTHOR: %s\n"
+                       ":COMMIT-GIT-DIR: %s\n:COMMIT-REPO: %s\n"
+                       ":COMMIT-BRANCH: %s\n:END:\n")
                ts
                (or (plist-get info :short) "")
                (or (plist-get info :subject) "")
                ts
                (or (plist-get info :sha) "")
-               (or (plist-get info :author) ""))))
+               (or (plist-get info :author) "")
+               (or (ai-tracks--cwd-as-link (plist-get info :cwd)) "")
+               (or (plist-get info :repo) "")
+               (or (plist-get info :branch) ""))))
     (when-let ((url (plist-get info :url)))
       (insert (format "\n[[%s]]\n" url)))
     (let ((body (plist-get info :body)))

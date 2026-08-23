@@ -260,6 +260,15 @@ trees, etc.).
      <your typed note>
 
 **** Commit abc123 — Fix parser bug            (from magit)
+     :PROPERTIES:
+     :POI-CATEGORY:    Commit
+     :COMMIT-SHA:      <full sha>
+     :COMMIT-AUTHOR:   Name <mail@example.com>
+     :COMMIT-GIT-DIR:  [[file:/path/to/worktree/]]
+     :COMMIT-REPO:     git@github.com:OWNER/REPO.git
+     :COMMIT-BRANCH:   main
+     :END:
+
      [[https://github.com/OWNER/REPO/commit/<sha>]]
 
      <full commit body>

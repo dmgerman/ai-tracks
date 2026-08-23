@@ -83,7 +83,10 @@ Per-category timestamp drawer key (in addition to `:POI-CATEGORY:`):
 - Recap / End-of-session → `:CLAUDE-RECAPPED:`
 - Resume → `:CLAUDE-RESUMED:`
 - explicit POI → `:CLAUDE-POI:`
-- Commit → `:CLAUDE-COMMIT:` plus `:COMMIT-SHA:`, `:COMMIT-AUTHOR:`
+- Commit → `:CLAUDE-COMMIT:` plus `:COMMIT-SHA:`, `:COMMIT-AUTHOR:`,
+  `:COMMIT-GIT-DIR:` (worktree root, wrapped as `[[file:/path]]` like
+  `:CLAUDE-CWD:`), `:COMMIT-REPO:` (raw `origin` URL), `:COMMIT-BRANCH:`;
+  the last three are empty when unavailable (no origin, detached HEAD)
 - Summary → `:CLAUDE-SUMMARIZED:`
 - Plan → `:CLAUDE-PLANNED:` plus `:POI-SUB-CATEGORY:` (values: `accepted`,
   `rejected`, `edited` — classified from the PostToolUse `tool_response`);
