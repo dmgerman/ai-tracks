@@ -101,14 +101,14 @@ the SessionStart JSON payload; either may be nil."
                      (ai-tracks--escape-capture source)
                      (ai-tracks--escape-capture started)))
          (org-roam-capture-templates
-          `(("t" "AI Track"
+          `(("t" "AI Tracks"
              entry ,body
              :target (node+headline nil "AI Tracks")
              :filter-fn dmg-org-roam-parea-p
-             :jump-to-captured
+             :jump-to-captured t
              :empty-lines 1))))
-    (ai-tracks--raise-emacs)
-    (org-roam-capture-)))
+    (ai-tracks--raise-emacs))
+  (org-roam-capture-))
 
 ;;;###autoload
 (defun ai-tracks-resume-add (session-id)
