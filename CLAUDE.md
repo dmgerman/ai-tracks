@@ -149,6 +149,23 @@ when nil.  N and truncation width come from
 `ai-tracks-poi-picker-limit` (30) and `ai-tracks-poi-picker-width`
 (100).
 
+### Emacs-only commands
+
+- **`M-x ai-tracks-session-restart`** — from inside a Track, opens a
+  new kitty tab (via `kitty @ launch`, socket = newest
+  `/tmp/kitty-*` or `ai-tracks-kitty-socket`) in the Track's
+  `:CLAUDE-CWD:`, titled after a prompted title (default: nearest
+  `PROJ`/`AREA` ancestor heading, else the top-level heading), and
+  types `<prompted command> --resume <uuid>` into its shell with
+  `kitty @ send-text --stdin` (stdin avoids kitty's escape
+  interpretation).  Writes nothing to the org file.
+- **`M-x ai-tracks-magit-goto`** — from inside a Track, opens
+  `magit-status-setup-buffer` on the repo root containing the
+  Track's `:CLAUDE-CWD:` (user-error if not in a repo, rather than
+  letting magit offer to `git init`).  Shares
+  `ai-tracks--track-marker-at-point` / `ai-tracks--track-cwd` with
+  `ai-tracks-session-restart`.
+
 ### Automatic triggers
 
 - **Claude Code PostToolUse hook on `ExitPlanMode`** — configured

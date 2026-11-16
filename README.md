@@ -16,6 +16,8 @@ to the project they belong to.
 - `pandoc` (optional — used by `/at:poi` to convert Claude's last
   answer from markdown to org; without it, the raw markdown is
   inserted and a warning is shown in the minibuffer).
+- [`kitty`](https://sw.kovidgoyal.net/kitty/) with remote control
+  enabled (optional — for `ai-tracks-session-restart`).
 
 ## Installation
 
@@ -187,6 +189,40 @@ Must be invoked from inside a Track subtree so the session UUID
 can be derived from the enclosing Track's `:ID:`.  Signals a
 `user-error` — inserting nothing — when point is not inside a
 Track or no transcript file exists for this session.
+
+## Restarting a Track's session in kitty
+
+`M-x ai-tracks-session-restart`, with point anywhere inside a Track,
+reopens that Track's Claude session in a new
+[kitty](https://sw.kovidgoyal.net/kitty/) tab.  Emacs prompts for:
+
+1. the claude command (default `ai-tracks-claude-command`, `"claude"`;
+   `M-p` recalls earlier variants such as `claude --model opus`), and
+2. the tab title (default: the title of the enclosing `PROJ`/`AREA`
+   heading, falling back to the top-level heading).
+
+It then opens a tab in the Track's `:CLAUDE-CWD:` and types
+`<command> --resume <session-uuid>` into the tab's shell, so the
+shell stays when claude exits.  Signals a `user-error` when point is
+not inside a Track or `:CLAUDE-CWD:` is not an existing directory.
+
+kitty must accept remote control over a socket, e.g. in `kitty.conf`:
+
+```
+allow_remote_control yes
+listen_on unix:/tmp/kitty
+```
+
+kitty appends `-<pid>` to that path; ai-tracks uses the newest
+`/tmp/kitty-*` socket unless `ai-tracks-kitty-socket` is set (e.g.
+`"unix:/tmp/kitty-1234"`).
+
+## Opening magit for a Track
+
+`M-x ai-tracks-magit-goto`, with point anywhere inside a Track, opens
+magit's status buffer for the git repository containing the Track's
+`:CLAUDE-CWD:`.  Signals a `user-error` when point is not inside a
+Track, or that directory is missing or not in a git repository.
 
 ## Typical workflow
 

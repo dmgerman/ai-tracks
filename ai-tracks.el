@@ -1188,13 +1188,142 @@ Signals a user-error if no Track is registered for this session."
     (org-roam-node-visit node)
     (ai-tracks--raise-emacs)))
 
+;;;; Restart a Track's session in a new kitty tab
+
+(defvar ai-tracks-kitty-program "kitty"
+  "Kitty executable used for `kitty @' remote-control calls.")
+
+(defvar ai-tracks-kitty-socket nil
+  "Kitty remote-control address, e.g. \"unix:/tmp/kitty-1234\".
+When nil, the most recently modified /tmp/kitty-* socket is used.
+That matches `listen_on unix:/tmp/kitty' in kitty.conf, for which
+kitty appends -<pid> to the path.")
+
+(defvar ai-tracks-claude-command "claude"
+  "Default command offered by `ai-tracks-session-restart'.")
+
+(defvar ai-tracks-claude-command-history nil
+  "Minibuffer history of commands entered in `ai-tracks-session-restart'.")
+
+(defvar ai-tracks-tab-title-history nil
+  "Minibuffer history of tab titles entered in `ai-tracks-session-restart'.")
+
+(defun ai-tracks--kitty-socket ()
+  "Return the kitty remote-control address to talk to.
+Signals a user-error when no socket can be found."
+  (or ai-tracks-kitty-socket
+      (let* ((sockets (seq-filter
+                       (lambda (f)
+                         (string-prefix-p "s" (file-attribute-modes
+                                               (file-attributes f))))
+                       (file-expand-wildcards "/tmp/kitty-*")))
+             (newest  (car (sort sockets #'file-newer-than-file-p))))
+        (unless newest
+          (user-error "ai-tracks: no kitty socket in /tmp/kitty-*; is kitty running with listen_on?"))
+        (concat "unix:" newest))))
+
+(defun ai-tracks--kitty (socket input &rest args)
+  "Run `kitty @ --to SOCKET ARGS' and return its trimmed output.
+INPUT, when non-nil, is fed to the process on stdin.  Signals a
+user-error if kitty exits with a non-zero status."
+  (with-temp-buffer
+    (when input (insert input))
+    (let ((status (apply #'call-process-region (point-min) (point-max)
+                         ai-tracks-kitty-program t t nil
+                         "@" "--to" socket args)))
+      (unless (eql status 0)
+        (user-error "ai-tracks: kitty @ %s failed: %s"
+                    (car args) (string-trim (buffer-string))))
+      (string-trim (buffer-string)))))
+
+(defun ai-tracks--track-marker-at-point ()
+  "Return a marker at the Track enclosing point.
+Signals a user-error when point is not inside a Track."
+  (or (ai-tracks--enclosing-track-marker)
+      (user-error "ai-tracks: point is not inside a Track")))
+
+(defun ai-tracks--track-cwd (track-marker)
+  "Return the :CLAUDE-CWD: directory of the Track at TRACK-MARKER.
+Signals a user-error when the property is missing or not a directory."
+  (let ((cwd (ai-tracks--unwrap-cwd (org-entry-get track-marker "CLAUDE-CWD"))))
+    (unless (and cwd (file-directory-p cwd))
+      (user-error "ai-tracks: Track's :CLAUDE-CWD: %s is not a directory"
+                  (or cwd "(missing)")))
+    cwd))
+
+(defun ai-tracks--ancestor-headings ()
+  "Return (TODO . TITLE) for each ancestor heading of point, nearest first."
+  (save-excursion
+    (when (org-up-heading-safe)
+      (cons (cons (org-get-todo-state)
+                  (substring-no-properties (org-get-heading t t t t)))
+            (ai-tracks--ancestor-headings)))))
+
+(defun ai-tracks--parea-title (track-marker)
+  "Return the title of the PROJ/AREA heading enclosing TRACK-MARKER.
+Falls back to the top-level heading's title, or nil if there is none."
+  (org-with-point-at track-marker
+    (let ((ancestors (ai-tracks--ancestor-headings)))
+      (cdr (or (seq-find (lambda (a) (member (car a) '("PROJ" "AREA")))
+                         ancestors)
+               (car (last ancestors)))))))
+
+;;;###autoload
+(defun ai-tracks-session-restart ()
+  "Resume the Claude session of the Track at point in a new kitty tab.
+Prompts for the claude command (default `ai-tracks-claude-command')
+and the tab title (default: the enclosing PROJ/AREA heading), opens
+a kitty tab in the Track's :CLAUDE-CWD:, and types
+`<command> --resume <session-id>' into its shell.  Signals a
+user-error when point is not inside a Track."
+  (interactive)
+  (let* ((marker  (ai-tracks--track-marker-at-point))
+         (session (string-remove-prefix
+                   "claude-" (org-entry-get marker "ID")))
+         (cwd     (ai-tracks--track-cwd marker)))
+    (let* ((command (read-string
+                     (format-prompt "Claude command" ai-tracks-claude-command)
+                     nil 'ai-tracks-claude-command-history
+                     ai-tracks-claude-command))
+           (default-title (ai-tracks--parea-title marker))
+           (title   (read-string (format-prompt "Tab title" default-title)
+                                 nil 'ai-tracks-tab-title-history
+                                 default-title))
+           (socket  (ai-tracks--kitty-socket))
+           (window  (ai-tracks--kitty socket nil "launch" "--type=tab"
+                                      "--tab-title" title
+                                      "--cwd" (expand-file-name cwd))))
+      (ai-tracks--kitty socket
+                        (format "%s --resume %s\n"
+                                command (shell-quote-argument session))
+                        "send-text" "--match" (concat "id:" window) "--stdin")
+      (when (eq system-type 'darwin)
+        (ns-do-applescript "tell application \"kitty\" to activate"))
+      (message "ai-tracks: resuming %s in kitty tab \"%s\"" session title))))
+
 ;;;; Magit / commit integration
 
+(declare-function magit-status-setup-buffer "magit-status")
 (declare-function magit-toplevel     "magit-git")
 (declare-function magit-rev-parse    "magit-git")
 (declare-function magit-git-string   "magit-git")
 (declare-function magit-git-lines    "magit-git")
 (declare-function magit-git-dir      "magit-git")
+
+;;;###autoload
+(defun ai-tracks-magit-goto ()
+  "Open magit status for the directory of the Track at point.
+Uses the Track's :CLAUDE-CWD:.  Signals a user-error when point is
+not inside a Track, or the directory is missing or not in a git
+repository."
+  (interactive)
+  (require 'magit)
+  (let* ((cwd      (ai-tracks--track-cwd (ai-tracks--track-marker-at-point)))
+         (toplevel (let ((default-directory (file-name-as-directory cwd)))
+                     (magit-toplevel))))
+    (unless toplevel
+      (user-error "ai-tracks: %s is not inside a git repository" cwd))
+    (magit-status-setup-buffer toplevel)))
 
 (defun ai-tracks--commit-cwd ()
   "Return the git worktree root at `default-directory', or nil."
