@@ -162,7 +162,7 @@ Categories:
 | `Resume` | Auto: SessionStart hook fires with `source: resume` |
 | `Commit` | Auto: `ai-tracks-magit-mode` on a magit commit |
 | `Plan` | Auto: PostToolUse hook on `ExitPlanMode`. The POI is created every time Claude submits a plan for approval. Rule: if the trailing Plan POI is `rejected`, the incoming fire is a *revision* — it overwrites in place, bumping `:PLAN-REVISIONS:` (carries `:PLAN-FIRST-SUBMITTED:` across revisions and records the prior status in `:PLAN-PREVIOUS-STATUS:`). If the trailing Plan is `accepted` or `edited`, the incoming fire is a *new plan* — it appends a fresh POI and stamps `:PLAN-FINISHED-AT:` on the prior one. `/at:end-session` stamps `:PLAN-FINISHED-AT:` on the most recent Plan POI. Absence of `:PLAN-FINISHED-AT:` means "still in flight". `:POI-SUB-CATEGORY:` records `accepted` / `rejected` / `edited`. Title is the plan's own first `#` heading prefixed with `Plan [<date>]` (fallback `Plan [<date>]` when the plan carries no heading). |
-| `Bead` | Auto: PostToolUse hook on `Bash`. Whenever a command runs `bd close` / `bd done`, each named bead that is now closed gets a POI (once per Track). Title `Bead [<date>] <id> — <title>`; body holds the close reason, the bead's `Commit:` note lines, and its description. Beads closed outside Claude (your own shell) are not recorded. |
+| `Bead` | Auto: PostToolUse hook on `Bash`. Whenever a command runs `bd close` / `bd done`, each named bead that is now closed gets a POI (once per Track). Title `Bead [<date>] <id> — <title>`; body holds the close reason, the bead's `Commit:` notes (each as full hash + one-line log, plus the GitHub commit URL when the repo's origin is on GitHub), and its description. Beads closed outside Claude (your own shell) are not recorded. |
 | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `/at:poi` (you pick from the list) |
 | `Summary` | Auto on every `/at:end-session` — appended to a rolling Summary heading at the top of the Track |
 
@@ -338,7 +338,8 @@ trees, etc.).
      Close reason: <bd close --reason>
 
      Commits:
-     - <each `Commit:` line from the bead's notes>
+     - <full hash> <one-line log>          (one per `Commit:` note)
+       https://github.com/OWNER/REPO/commit/<full hash>   (GitHub origins only)
 
      #+begin_example
      <bead description>

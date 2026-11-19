@@ -1228,6 +1228,53 @@ directory for the segments after it, as does `bd -C DIR'."
                       (match-string 1 line)))
                   (split-string notes "\n")))))
 
+(defun ai-tracks--git (dir &rest args)
+  "Run git with ARGS in DIR; return trimmed stdout, or nil on failure."
+  (let ((default-directory (file-name-as-directory dir)))
+    (with-temp-buffer
+      (when (and (file-directory-p default-directory)
+                 (eql 0 (ignore-errors
+                          (apply #'call-process "git" nil (list t nil) nil
+                                 args))))
+        (let ((out (string-trim (buffer-string))))
+          (unless (string-empty-p out) out))))))
+
+(defun ai-tracks--bead-commit-repo (label dir)
+  "Return the repo directory a bead `Commit:' note names with LABEL.
+DIR is where `bd' ran.  LABEL is `superproject' (or nil) for the git
+toplevel of DIR, else a path relative to that toplevel (a submodule)."
+  (when-let* ((top (ai-tracks--git dir "rev-parse" "--show-toplevel")))
+    (if (or (null label) (equal label "superproject"))
+        top
+      (let ((sub (expand-file-name label top)))
+        (and (file-directory-p sub) sub)))))
+
+(defun ai-tracks--bead-commit-lines (note dir)
+  "Return the org list item for bead `Commit:' NOTE, bd run in DIR.
+NOTE is `[<repo>] <hash> <subject>'.  When the hash resolves in the
+repo it names, the item is `- <full hash> <one-line log>', followed
+by the GitHub commit URL when that repo's origin is on GitHub.
+Otherwise the item is NOTE verbatim."
+  (let* ((words (split-string note))
+         (hash-p (lambda (w) (string-match-p "\\`[0-9a-f]\\{7,40\\}\\'" w)))
+         (label (and (cadr words) (funcall hash-p (cadr words))
+                     (not (funcall hash-p (car words)))
+                     (car words)))
+         (hash  (if label (cadr words) (car words)))
+         (repo  (and hash (funcall hash-p hash)
+                     (ai-tracks--bead-commit-repo label dir)))
+         (full  (and repo (ai-tracks--git repo "rev-parse" "--verify"
+                                          "--quiet" (concat hash "^{commit}"))))
+         (line  (and full (ai-tracks--git repo "log" "-1" "--format=%H %s" full)))
+         (gh    (and full (ai-tracks--parse-github-remote
+                           (ai-tracks--git repo "config" "--get"
+                                           "remote.origin.url")))))
+    (cond
+     ((not line) (format "- %s\n" note))
+     (gh (format "- %s\n  https://github.com/%s/%s/commit/%s\n"
+                 line (car gh) (cdr gh) full))
+     (t (format "- %s\n" line)))))
+
 (defun ai-tracks--insert-bead (marker bead dir)
   "Append a level-4 Bead POI for BEAD under the Track at MARKER.
 BEAD is the alist from `ai-tracks--bd-show'; DIR is where `bd' ran."
@@ -1255,7 +1302,7 @@ BEAD is the alist from `ai-tracks--bd-show'; DIR is where `bd' ran."
       (when commits
         (insert "\nCommits:\n")
         (dolist (c commits)
-          (insert (format "- %s\n" c))))
+          (insert (ai-tracks--bead-commit-lines c dir))))
       (when (and (stringp desc) (not (string-empty-p (string-trim desc))))
         (insert "\n#+begin_example\n"
                 (org-escape-code-in-string (string-trim desc))

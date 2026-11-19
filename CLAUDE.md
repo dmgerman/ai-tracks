@@ -91,7 +91,13 @@ Per-category timestamp drawer key (in addition to `:POI-CATEGORY:`):
 - Bead → `:CLAUDE-BEAD-CLOSED:` plus `:BEAD-ID:`, `:BEAD-TYPE:`,
   `:BEAD-PRIORITY:` (`P<n>`), `:BEAD-DIR:` (where `bd` ran, wrapped as
   `[[file:/path]]` like `:CLAUDE-CWD:`).  Body: close reason, the
-  bead's `Commit:` note lines as a list, description in an example block
+  bead's `Commit:` note lines as a list, description in an example block.
+  Each `Commit: [<repo>] <hash> <subject>` note is resolved
+  (`ai-tracks--bead-commit-lines`): `<repo>` is `superproject` (git
+  toplevel of `:BEAD-DIR:`) or a path under it; the item becomes
+  `- <full hash> <one-line log>` plus an indented GitHub commit URL
+  when that repo's origin is on GitHub.  Unresolvable notes are kept
+  verbatim
 - Summary → `:CLAUDE-SUMMARIZED:`
 - Plan → `:CLAUDE-PLANNED:` plus `:POI-SUB-CATEGORY:` (values: `accepted`,
   `rejected`, `edited` — classified from the PostToolUse `tool_response`);
