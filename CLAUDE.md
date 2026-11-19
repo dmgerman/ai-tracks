@@ -28,6 +28,7 @@ slash-command behavior; keep it in sync when those change.
   | `Resume` | `ai-tracks--session-resume-add` | SessionStart hook with `source: resume` |
   | `Commit` | `ai-tracks--insert-commit` | `ai-tracks-magit-mode` fires on any magit commit |
   | `Plan` | `ai-tracks-plan-add` | Claude Code PostToolUse hook fires on every `ExitPlanMode` (approved, rejected, or edited) |
+  | `Bead` | `ai-tracks-bead-add` → `ai-tracks--insert-bead` | Claude Code PostToolUse hook on `Bash` when the command runs `bd close` / `bd done` |
   | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `ai-tracks-poi-new` | `/at:poi` or `M-x ai-tracks-poi-new` (user-authored — "explicit POI" in module vocabulary) |
   | `Summary` | `ai-tracks--append-to-summary` (invoked from `ai-tracks-end-session-add`) | Rolling per-Track summary — the first level-4 child of the Track; gets a new dated bullet group every `/at:end-session`. |
 
@@ -87,6 +88,10 @@ Per-category timestamp drawer key (in addition to `:POI-CATEGORY:`):
   `:COMMIT-GIT-DIR:` (worktree root, wrapped as `[[file:/path]]` like
   `:CLAUDE-CWD:`), `:COMMIT-REPO:` (raw `origin` URL), `:COMMIT-BRANCH:`;
   the last three are empty when unavailable (no origin, detached HEAD)
+- Bead → `:CLAUDE-BEAD-CLOSED:` plus `:BEAD-ID:`, `:BEAD-TYPE:`,
+  `:BEAD-PRIORITY:` (`P<n>`), `:BEAD-DIR:` (where `bd` ran, wrapped as
+  `[[file:/path]]` like `:CLAUDE-CWD:`).  Body: close reason, the
+  bead's `Commit:` note lines as a list, description in an example block
 - Summary → `:CLAUDE-SUMMARIZED:`
 - Plan → `:CLAUDE-PLANNED:` plus `:POI-SUB-CATEGORY:` (values: `accepted`,
   `rejected`, `edited` — classified from the PostToolUse `tool_response`);
@@ -182,6 +187,24 @@ when nil.  N and truncation width come from
   content prose. Missing Track / no readable plan → `display-warning`
   and skip; the hook fires in every project regardless of whether
   ai-tracks is in use.
+- **Claude Code PostToolUse hook on `Bash`** — configured in
+  `~/.claude/settings.json`. Runs `bin/ai-tracks-bead.sh`, which
+  fires on every Bash call, so it greps the raw payload for
+  `bd ... close|done` and exits early otherwise (no emacsclient).
+  Matches go to `ai-tracks-bead-add`, which parses
+  `tool_input.command` with a small quote-aware splitter
+  (`ai-tracks--shell-segments`: segments on `&&`/`||`/`;`/`|`/`&`,
+  drops redirections), finds `bd [global flags] close|done <ids>`
+  (`ai-tracks--bd-close-args`), and tracks the directory through
+  `cd DIR` segments and `bd -C DIR` (`ai-tracks--bd-closes`).  Each
+  id is looked up with `bd show <id> --json` in that directory and
+  recorded only if its status is now `closed` (so a failed close
+  records nothing) and the Track has no Bead POI with that
+  `:BEAD-ID:` yet (so re-closing doesn't duplicate).  beads itself
+  has no close hook (`bd hooks` are git hooks only), which is why the
+  trigger is the Claude tool call; closes done outside Claude are
+  not recorded.  No raise: the entry is passive.  Missing Track →
+  `display-warning` and skip.
 - **Claude Code SessionStart hook** — configured in
   `~/.claude/settings.json`, matcher `startup|resume`. Runs
   `bin/ai-tracks-session-start.sh` which hands the payload to
@@ -274,7 +297,7 @@ when nil.  N and truncation width come from
 ## Files
 
 - `ai-tracks.el` — the module (session capture, recap, POI, end-session,
-  commit, magit-mode).
+  plan, bead, commit, magit-mode).
 - `bin/ai-tracks-session-start.sh` — SessionStart hook wrapper
   (non-blocking).
 - `bin/ai-tracks-recap-since.sh` — prints the boundary for the current
@@ -292,6 +315,9 @@ when nil.  N and truncation width come from
 - `bin/ai-tracks-plan.sh` — PostToolUse hook wrapper for
   `ExitPlanMode`; persists the payload to a temp file and hands the
   path to `ai-tracks-plan-add` (non-blocking).
+- `bin/ai-tracks-bead.sh` — PostToolUse hook wrapper for `Bash`;
+  pre-filters for `bd close`/`bd done`, then hands the payload path
+  to `ai-tracks-bead-add` (non-blocking).
 - `~/.claude/commands/at/*.md` — slash-command instructions.
 - Loaded via `use-package ai-tracks` in `dmg-ai.org` under
   `** ai-tracks`.

@@ -41,10 +41,13 @@ Clone the module into `~/.emacs.d/modules/ai-tracks/` and load it with
 
 ### `~/.claude/settings.json`
 
-Three things need to go into your Claude Code settings: the
+Four things need to go into your Claude Code settings: the
 SessionStart hook (fires on both `startup` and `resume`), the
 PostToolUse hook for `ExitPlanMode` (records a Plan POI every time
-you approve, reject, or edit a plan), and a permission entry so
+you approve, reject, or edit a plan), the PostToolUse hook for
+`Bash` (records a Bead POI whenever Claude closes a
+[beads](https://github.com/gastownhall/beads) issue with
+`bd close`), and a permission entry so
 Claude can invoke the ai-tracks scripts without prompting each time.
 
 Full block, copy-paste ready — **replace `/Users/YOU` with your home
@@ -71,6 +74,15 @@ directory**:
           {
             "type": "command",
             "command": "/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-plan.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/YOU/.emacs.d/modules/ai-tracks/bin/ai-tracks-bead.sh"
           }
         ]
       }
@@ -150,6 +162,7 @@ Categories:
 | `Resume` | Auto: SessionStart hook fires with `source: resume` |
 | `Commit` | Auto: `ai-tracks-magit-mode` on a magit commit |
 | `Plan` | Auto: PostToolUse hook on `ExitPlanMode`. The POI is created every time Claude submits a plan for approval. Rule: if the trailing Plan POI is `rejected`, the incoming fire is a *revision* — it overwrites in place, bumping `:PLAN-REVISIONS:` (carries `:PLAN-FIRST-SUBMITTED:` across revisions and records the prior status in `:PLAN-PREVIOUS-STATUS:`). If the trailing Plan is `accepted` or `edited`, the incoming fire is a *new plan* — it appends a fresh POI and stamps `:PLAN-FINISHED-AT:` on the prior one. `/at:end-session` stamps `:PLAN-FINISHED-AT:` on the most recent Plan POI. Absence of `:PLAN-FINISHED-AT:` means "still in flight". `:POI-SUB-CATEGORY:` records `accepted` / `rejected` / `edited`. Title is the plan's own first `#` heading prefixed with `Plan [<date>]` (fallback `Plan [<date>]` when the plan carries no heading). |
+| `Bead` | Auto: PostToolUse hook on `Bash`. Whenever a command runs `bd close` / `bd done`, each named bead that is now closed gets a POI (once per Track). Title `Bead [<date>] <id> — <title>`; body holds the close reason, the bead's `Commit:` note lines, and its description. Beads closed outside Claude (your own shell) are not recorded. |
 | `Surprise` \| `Event` \| `Decision` \| `Observation` \| `Other` | `/at:poi` (you pick from the list) |
 | `Summary` | Auto on every `/at:end-session` — appended to a rolling Summary heading at the top of the Track |
 
@@ -312,6 +325,25 @@ trees, etc.).
      - path/a
      - path/b
 
+**** Bead [2026-07-30 Thu 08:30] proj-a1b — Fix the parser
+     :PROPERTIES:
+     :POI-CATEGORY:       Bead
+     :CLAUDE-BEAD-CLOSED: [2026-07-30 Thu 08:30]
+     :BEAD-ID:            proj-a1b
+     :BEAD-TYPE:          bug
+     :BEAD-PRIORITY:      P1
+     :BEAD-DIR:           [[file:/path/to/project]]
+     :END:
+
+     Close reason: <bd close --reason>
+
+     Commits:
+     - <each `Commit:` line from the bead's notes>
+
+     #+begin_example
+     <bead description>
+     #+end_example
+
 **** Plan [2026-07-30 Thu 08:12] Refactor the parser   (title = timestamp + first `#`)
      :PROPERTIES:
      :POI-CATEGORY:         Plan
@@ -352,6 +384,12 @@ if you want to test or script it. See `bin/`:
   calls `ai-tracks-plan-add`.  The plan itself is not in the
   payload — Emacs reads it from disk at the path extracted from
   `tool_response.content`.
+- `ai-tracks-bead.sh` — takes PostToolUse-shape JSON for the `Bash`
+  tool on stdin (`{session_id, cwd, tool_input: {command}}`) and,
+  only when the payload mentions `bd ... close|done`, calls
+  `ai-tracks-bead-add`.  Emacs parses the command for the bead ids
+  (following `cd DIR` and `bd -C DIR`) and looks each one up with
+  `bd show --json`.
 
 ## Troubleshooting
 

@@ -35,6 +35,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'json)
 (require 'org-roam)
 (require 'org-roam-capture)
@@ -1068,6 +1069,255 @@ fires PostToolUse unconditionally."
           (message "ai-tracks: %s" (cdr conv)))
         (ai-tracks--raise-emacs)
         ts)))))
+
+;;;; Bead (Claude Code Bash PostToolUse hook on `bd close')
+
+(defvar ai-tracks-bd-program "bd"
+  "Name or path of the beads CLI used to look up closed beads.")
+
+(defconst ai-tracks--bd-close-flags-with-value
+  '("-r" "--reason" "--reason-file" "--session")
+  "Flags of `bd close' that consume the following token as their value.")
+
+(defconst ai-tracks--bd-global-flags-with-value
+  '("-C" "--directory" "--db" "--database" "--actor" "--dolt-auto-commit")
+  "Global `bd' flags that consume the following token as their value.")
+
+(defun ai-tracks--shell-segments (command)
+  "Split shell COMMAND into simple-command segments, each a token list.
+Segments end at `&&', `||', `;', `|', `&' and newlines outside
+quotes.  Single and double quotes group words and are removed; a
+backslash escapes the next character (except inside single quotes).
+Redirections (`2>&1', `> file', `<file') are dropped.  Good enough
+for the commands Claude issues; not a shell parser."
+  (let ((segments nil) (tokens nil) (word nil) (in-word nil)
+        (quote-char nil) (i 0) (n (length command)))
+    (cl-flet ((end-word ()
+                (when in-word
+                  (push (apply #'string (nreverse word)) tokens))
+                (setq word nil in-word nil))
+              (end-segment ()
+                (when tokens (push (nreverse tokens) segments))
+                (setq tokens nil)))
+      (while (< i n)
+        (let ((c (aref command i)))
+          (cond
+           ((and quote-char (eq c quote-char))
+            (setq quote-char nil))
+           ((and (eq quote-char ?\") (eq c ?\\) (< (1+ i) n))
+            (setq i (1+ i))
+            (push (aref command i) word))
+           (quote-char (push c word))
+           ((memq c '(?\" ?\'))
+            (setq quote-char c in-word t))
+           ((and (eq c ?\\) (< (1+ i) n))
+            (setq i (1+ i) in-word t)
+            (push (aref command i) word))
+           ((memq c '(?\s ?\t)) (end-word))
+           ((memq c '(?\; ?| ?& ?\n))
+            ;; `2>&1' / `&>': the `&' belongs to a redirection.
+            (if (and (eq c ?&) in-word (eq (car word) ?>))
+                (push c word)
+              (end-word)
+              (end-segment)))
+           (t (push c word) (setq in-word t))))
+        (setq i (1+ i)))
+      (end-word)
+      (end-segment))
+    (mapcar #'ai-tracks--drop-redirections (nreverse segments))))
+
+(defun ai-tracks--drop-redirections (tokens)
+  "Return TOKENS without shell redirections and their targets."
+  (cond
+   ((null tokens) nil)
+   ((string-match-p "\\`[0-9]*\\(>>\\|>\\|<\\)\\'" (car tokens))
+    (ai-tracks--drop-redirections (cddr tokens)))
+   ((string-match-p "\\`[0-9]*[<>&]" (car tokens))
+    (ai-tracks--drop-redirections (cdr tokens)))
+   (t (cons (car tokens) (ai-tracks--drop-redirections (cdr tokens))))))
+
+(defun ai-tracks--bd-close-args (tokens)
+  "If TOKENS is a `bd close' (or `bd done') invocation, return its args.
+Returns a plist (:ids IDS :dir DIR) where IDS are the positional
+bead ids and DIR is the value of a global `-C'/`--directory' flag,
+or nil.  Returns nil when TOKENS is not a close."
+  (when (and tokens (equal (file-name-nondirectory (car tokens)) "bd"))
+    (let* ((rest   (cdr tokens))
+           (dir    nil))
+      ;; Skip global flags before the subcommand, remembering -C.
+      (while (and rest (string-prefix-p "-" (car rest)))
+        (let ((flag (car rest)))
+          (cond
+           ((member flag ai-tracks--bd-global-flags-with-value)
+            (when (member flag '("-C" "--directory"))
+              (setq dir (cadr rest)))
+            (setq rest (cddr rest)))
+           ((string-match "\\`--directory=\\(.*\\)" flag)
+            (setq dir (match-string 1 flag)
+                  rest (cdr rest)))
+           (t (setq rest (cdr rest))))))
+      (when (member (car rest) '("close" "done"))
+        (let ((args (cdr rest))
+              (ids  nil))
+          (while args
+            (let ((arg (car args)))
+              (cond
+               ((member arg ai-tracks--bd-close-flags-with-value)
+                (setq args (cddr args)))
+               ((string-prefix-p "-" arg)
+                (setq args (cdr args)))
+               (t (push arg ids)
+                  (setq args (cdr args))))))
+          (list :ids (nreverse ids) :dir dir))))))
+
+(defun ai-tracks--bd-closes (command cwd)
+  "Return the beads closed by shell COMMAND run in CWD.
+Each element is (ID . DIR): the bead id and the directory to run
+`bd' in to look it up.  A leading `cd DIR' segment changes the
+directory for the segments after it, as does `bd -C DIR'."
+  (let ((dir    cwd)
+        (closes nil))
+    (dolist (tokens (ai-tracks--shell-segments command))
+      (if (and (equal (car tokens) "cd") (cadr tokens))
+          (setq dir (expand-file-name (cadr tokens) dir))
+        (when-let* ((close (ai-tracks--bd-close-args tokens)))
+          (let ((bd-dir (if (plist-get close :dir)
+                            (expand-file-name (plist-get close :dir) dir)
+                          dir)))
+            (dolist (id (plist-get close :ids))
+              (push (cons id bd-dir) closes))))))
+    (nreverse closes)))
+
+(defun ai-tracks--bd-show (id dir)
+  "Return the `bd show ID --json' record for ID, run in DIR, or nil."
+  (let ((default-directory (file-name-as-directory dir)))
+    (with-temp-buffer
+      (when (and (file-directory-p default-directory)
+                 (eql 0 (ignore-errors
+                          (call-process ai-tracks-bd-program nil
+                                        (list t nil) nil
+                                        "show" id "--json"))))
+        (goto-char (point-min))
+        (let ((parsed (ignore-errors
+                        (json-parse-buffer :object-type 'alist
+                                           :array-type 'list
+                                           :null-object nil
+                                           :false-object nil))))
+          (if (and (listp parsed) (listp (car parsed)))
+              (car parsed)
+            parsed))))))
+
+(defun ai-tracks--bead-recorded-p (marker id)
+  "Non-nil when the Track at MARKER already has a Bead POI for ID."
+  (org-with-point-at marker
+    (let ((found nil))
+      (org-map-entries
+       (lambda ()
+         (when (and (equal (org-entry-get (point) "POI-CATEGORY") "Bead")
+                    (equal (org-entry-get (point) "BEAD-ID") id))
+           (setq found t)))
+       nil 'tree)
+      found)))
+
+(defun ai-tracks--bead-commits (notes)
+  "Return the `Commit: ...' lines in bead NOTES, without the prefix."
+  (when (stringp notes)
+    (delq nil
+          (mapcar (lambda (line)
+                    (when (string-match "\\`Commit:[ \t]*\\(.+\\)" line)
+                      (match-string 1 line)))
+                  (split-string notes "\n")))))
+
+(defun ai-tracks--insert-bead (marker bead dir)
+  "Append a level-4 Bead POI for BEAD under the Track at MARKER.
+BEAD is the alist from `ai-tracks--bd-show'; DIR is where `bd' ran."
+  (let* ((now     (current-time))
+         (ts      (format-time-string "[%Y-%m-%d %a %H:%M]" now))
+         (id      (alist-get 'id bead))
+         (reason  (alist-get 'close_reason bead))
+         (desc    (alist-get 'description bead))
+         (commits (ai-tracks--bead-commits (alist-get 'notes bead))))
+    (org-with-point-at marker
+      (goto-char (save-excursion (org-end-of-subtree t t)))
+      (unless (bolp) (insert "\n"))
+      (insert (format "**** Bead %s %s — %s\n:PROPERTIES:\n"
+                      ts id (or (alist-get 'title bead) "")))
+      (insert ":POI-CATEGORY: Bead\n")
+      (insert (format ":CLAUDE-BEAD-CLOSED: %s\n" ts))
+      (insert (format ":BEAD-ID: %s\n" id))
+      (insert (format ":BEAD-TYPE: %s\n" (or (alist-get 'issue_type bead) "")))
+      (insert (format ":BEAD-PRIORITY: %s\n"
+                      (let ((p (alist-get 'priority bead)))
+                        (if (numberp p) (format "P%d" p) ""))))
+      (insert (format ":BEAD-DIR: %s\n:END:\n" (ai-tracks--cwd-as-link dir)))
+      (when (and (stringp reason) (not (string-empty-p (string-trim reason))))
+        (insert "\nClose reason: " (string-trim reason) "\n"))
+      (when commits
+        (insert "\nCommits:\n")
+        (dolist (c commits)
+          (insert (format "- %s\n" c))))
+      (when (and (stringp desc) (not (string-empty-p (string-trim desc))))
+        (insert "\n#+begin_example\n"
+                (org-escape-code-in-string (string-trim desc))
+                "\n#+end_example\n"))
+      (save-buffer))))
+
+(defun ai-tracks-bead-add (json-file)
+  "Record a Bead POI for each bead closed by the Bash call in JSON-FILE.
+JSON-FILE is a path to a Claude Code PostToolUse hook payload for the
+`Bash' tool; it is read and deleted.
+
+Payload fields consulted:
+  session_id           the Track's Claude UUID.
+  cwd                  the directory the command ran in.
+  tool_input.command   the shell command; parsed for `bd close' /
+                       `bd done' invocations (see
+                       `ai-tracks--bd-closes').
+
+Each named bead is looked up with `bd show --json' and recorded only
+if its status is now `closed' — a failed close records nothing — and
+only once per Track (an existing Bead POI with the same :BEAD-ID:
+wins).
+
+Missing-Track case: warns via `display-warning' and returns nil.
+Returns the list of recorded bead ids."
+  (interactive "fClaude Code PostToolUse JSON file: ")
+  (let* ((payload    (ai-tracks--read-payload json-file))
+         (session-id (alist-get 'session_id payload))
+         (cwd        (or (alist-get 'cwd payload) default-directory))
+         (command    (alist-get 'command (alist-get 'tool_input payload)))
+         (closes     (and (stringp command)
+                          (ai-tracks--bd-closes command cwd)))
+         (marker     (and closes
+                          (condition-case _
+                              (and (stringp session-id)
+                                   (ai-tracks--track-marker session-id))
+                            (user-error nil)))))
+    (cond
+     ((not closes) nil)
+     ((not marker)
+      (display-warning
+       'ai-tracks
+       (format "No Track for session %s; Bead POI skipped"
+               (or session-id "<no session_id>"))
+       :warning)
+      nil)
+     (t
+      (let ((recorded nil))
+        (dolist (close closes)
+          (let* ((id   (car close))
+                 (dir  (cdr close))
+                 (bead (ai-tracks--bd-show id dir)))
+            (when (and bead
+                       (equal (alist-get 'status bead) "closed")
+                       (not (ai-tracks--bead-recorded-p
+                             marker (alist-get 'id bead))))
+              (ai-tracks--insert-bead marker bead dir)
+              (push (alist-get 'id bead) recorded))))
+        (when recorded
+          (message "ai-tracks: recorded closed bead(s) %s"
+                   (string-join (nreverse recorded) ", ")))
+        recorded)))))
 
 ;;;; Empty POI (user-invoked from Emacs, not via a slash command)
 
